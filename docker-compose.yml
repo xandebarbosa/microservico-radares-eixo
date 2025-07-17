@@ -1,0 +1,30 @@
+networks:
+  radares-net:
+    external: true
+
+services:
+  # ===============================================================
+  # NOSSO MICROSSERVIÇO: Radar Eixo
+  # ===============================================================
+  microservico-radar-eixo:
+    container_name: microservico-radares-eixo
+    # Em vez de 'image', usamos 'build' para construir a partir do nosso Dockerfile
+    build:
+      context: ../microservico-radares-eixo # Caminho relativo para a pasta do projeto
+    ports:
+      - "8086:8086" # Expõe a porta do serviço para a sua máquina
+    environment:
+      # ATIVA O PERFIL DE PRODUÇÃO, fazendo o Spring usar o application-prod.properties
+      - SPRING_PROFILES_ACTIVE=prod
+      # Você pode sobrescrever outras configs aqui, como as senhas de SFTP
+      - SFTP_HOST=${EIXO_SFTP_HOST}
+      - SFTP_PORT=${EIXO_SFTP_PORT}
+      - SFTP_USER=${EIXO_SFTP_USER}
+      - SFTP_PASS=${EIXO_SFTP_PASS}
+    networks:
+      - radares-net
+    restart: unless-stopped
+volumes:
+  postgres-eixo-data:
+  pgadmin-data: # <-- Adicionar o novo volume aqui
+  es-data:
