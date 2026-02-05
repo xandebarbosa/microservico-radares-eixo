@@ -1,11 +1,13 @@
 package com.coruja.repositories;
 
 import com.coruja.entities.Radars;
+import jakarta.persistence.QueryHint;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.jpa.repository.QueryHints;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
@@ -16,28 +18,56 @@ import java.util.List;
 @Repository
 public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpecificationExecutor<Radars> {
 
-    // Spring Data JPA entende esse nome de método e cria a query:
-    // SELECT * FROM radars WHERE placa = ?
-    Page<Radars> findByPlaca(String placa, Pageable pageable);
+    /**
+     * ✅ BUSCA OTIMIZADA POR PLACA
+     * Mudado para Native Query para garantir uso do índice GIN (pg_trgm) e evitar erro de mapeamento.
+     */
+    @Query(value = """
+        SELECT DISTINCT ON (r.data, r.hora, r.placa) r.* FROM radars_eixo r
+        WHERE r.placa ILIKE CONCAT('%', :placa, '%')
+        ORDER BY r.data DESC, r.hora DESC
+        """,
+            countQuery = """
+        SELECT COUNT(DISTINCT (r.data, r.hora, r.placa))
+        FROM radars_eixo r
+        WHERE r.placa ILIKE CONCAT('%', :placa, '%')
+        """, nativeQuery = true)
+    @QueryHints(@QueryHint(name = "org.hibernate.readOnly", value = "true"))
+    Page<Radars> findAllByPlaca(@Param("placa") String placa, Pageable pageable);
 
-    @Query("SELECT DISTINCT r.rodovia FROM Radars r WHERE r.rodovia IS NOT NULL AND r.rodovia != '' ORDER BY r.rodovia")
-    List<String> findDistinctRodovias();
-
-    @Query("SELECT DISTINCT r.km FROM Radars r WHERE r.km IS NOT NULL AND r.km != '' ORDER BY r.km")
-    List<String> findDistinctKms();
-
-    @Query("SELECT DISTINCT r.sentido FROM Radars r WHERE r.sentido IS NOT NULL AND r.sentido != '' ORDER BY r.sentido")
-    List<String> findDisntictSentidos();
-
-    @Query("SELECT DISTINCT r.praca FROM Radars r WHERE r.praca IS NOT NULL AND r.praca != '' ORDER BY r.praca")
-    List<String> findDistinctPracas();
-
-    @Query("SELECT DISTINCT r.km FROM Radars r WHERE r.rodovia = :rodovia AND r.km IS NOT NULL AND r.km <> '' ORDER BY r.km")
-    List<String> findDistinctKmsByRodovia(@Param("rodovia") String rodovia);
-
+    // 2. BUSCA POR LOCAL (Filtros Específicos: Data, Hora, Rodovia, Km, Sentido)
+    // Otimização: Query Nativa para evitar overhead do Hibernate em projeções complexas
+    /**
+     * ✅ BUSCA COM FILTROS COMBINADOS
+     */
+    @Query(value = """
+    SELECT DISTINCT ON (r.data, r.hora, r.placa) r.* FROM radars_eixo r
+    WHERE 1=1
+    AND (CAST(:placa AS TEXT) IS NULL OR r.placa ILIKE CONCAT('%', CAST(:placa AS TEXT), '%'))
+    AND (CAST(:praca AS TEXT) IS NULL OR r.praca ILIKE CONCAT('%', CAST(:praca AS TEXT), '%'))
+    AND (CAST(:km AS TEXT) IS NULL OR r.km = CAST(:km AS TEXT))
+    AND (CAST(:sentido AS TEXT) IS NULL OR r.sentido ILIKE CAST(:sentido AS TEXT)) -- Alterado para ILIKE
+    AND (CAST(:data AS DATE) IS NULL OR r.data = CAST(:data AS DATE))
+    AND (CAST(:horaInicial AS TIME) IS NULL OR r.hora >= CAST(:horaInicial AS TIME))
+    AND (CAST(:horaFinal AS TIME) IS NULL OR r.hora <= CAST(:horaFinal AS TIME))
+    ORDER BY r.data DESC, r.hora DESC, r.placa
+    """,
+            nativeQuery = true
+    )
+    @QueryHints(@QueryHint(name = "org.hibernate.readOnly", value = "true"))
+    Page<Radars> findByLocalFilter(
+            @Param("data") LocalDate data,
+            @Param("horaInicial") LocalTime horaInicial,
+            @Param("horaFinal") LocalTime horaFinal,
+            @Param("placa") String placa,
+            @Param("praca") String praca,
+            @Param("km") String km,
+            @Param("sentido") String sentido,
+            Pageable pageable
+    );
 
     /**
-     * MÉTODO PARA BUSCA POR PROXIMIDADE
+     * ✅ BUSCA GEOESPACIAL OTIMIZADA
      * Busca passagens de radar que ocorreram dentro de um raio específico
      * a partir de um ponto de coordenadas, em um determinado intervalo de tempo.
      * Utiliza uma consulta SQL nativa para aproveitar as funções do PostGIS.
@@ -51,12 +81,33 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
      * @param pageable Objeto de paginação.
      * @return Uma página de registros de radar encontrados.
      * */
-    @Query(value = "SELECT * FROM radars_cart " + // IMPORTANTE: Mude 'radars_cart' para a tabela correta em cada serviço
-            "WHERE data = :data " +
-            "AND hora BETWEEN :horaInicial AND :horaFinal " +
-            "AND ST_DWithin(localizacao, ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326), :raioEmMetros)",
-            nativeQuery = true)
-    Page<Radars> findByProximity(
+    @Query(value = """
+        SELECT DISTINCT ON (r.data, r.hora, r.placa) r.* FROM radars_eixo r
+        INNER JOIN localizacao_radar l ON r.localizacao_id = l.id
+        WHERE r.data = CAST(:data AS DATE)
+        AND r.hora BETWEEN CAST(:horaInicio AS TIME) AND CAST(:horaFim AS TIME)
+        AND ST_DWithin(
+            l.localizacao,
+            ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)::geography,
+            :raio
+        )
+        ORDER BY r.data DESC, r.hora DESC, r.placa
+        """,
+            countQuery = """
+        SELECT COUNT(DISTINCT (r.data, r.hora, r.placa))
+        FROM radars_eixo r
+        INNER JOIN localizacao_radar l ON r.localizacao_id = l.id
+        WHERE r.data = CAST(:data AS DATE)
+        AND r.hora BETWEEN CAST(:horaInicio AS TIME) AND CAST(:horaFim AS TIME)
+        AND ST_DWithin(
+            l.localizacao,
+            ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)::geography,
+            :raio
+        )
+        """,
+            nativeQuery = true
+    )
+    Page<Radars> findByLocalizacaoFilter(
             @Param("latitude") double latitude,
             @Param("longitude") double longitude,
             @Param("raioEmMetros") double raioEmMetros,
@@ -65,6 +116,44 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
             @Param("horaFinal") LocalTime horaFinal,
             Pageable pageable
     );
+
+    /**
+     * ✅ METADATA DE FILTROS
+     */
+    @Query(value = """
+        WITH dados_recentes AS (
+            SELECT rodovia, praca, km, sentido
+            FROM radars_eixo
+            WHERE data >= CURRENT_DATE - INTERVAL '30 days'
+        )
+        SELECT DISTINCT rodovia FROM dados_recentes WHERE rodovia IS NOT NULL ORDER BY rodovia
+        """, nativeQuery = true)
+    List<String> findDistinctRodoviasOtimizado();
+
+    @Query(value = """
+        SELECT DISTINCT praca FROM radars_eixo
+        WHERE data >= CURRENT_DATE - INTERVAL '30 days'
+        AND praca IS NOT NULL
+        ORDER BY praca
+        """, nativeQuery = true)
+    List<String> findDistinctPracasOtimizado();
+
+    @Query(value = """
+        SELECT DISTINCT km FROM radars_eixo
+        WHERE rodovia = :rodovia
+        AND data >= CURRENT_DATE - INTERVAL '30 days'
+        AND km IS NOT NULL
+        ORDER BY CAST(REGEXP_REPLACE(km, '[^0-9.]', '', 'g') AS NUMERIC)
+        """, nativeQuery = true)
+    List<String> findDistinctKmsByRodoviaOtimizado(@Param("rodovia") String rodovia);
+
+    @Query(value = """
+        SELECT DISTINCT sentido FROM radars_eixo
+        WHERE data >= CURRENT_DATE - INTERVAL '30 days'
+        AND sentido IS NOT NULL
+        ORDER BY sentido
+        """, nativeQuery = true)
+    List<String> findDistinctSentidosOtimizado();
 
 
 }

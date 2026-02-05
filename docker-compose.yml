@@ -21,6 +21,12 @@ services:
       - SFTP_PORT=${EIXO_SFTP_PORT}
       - SFTP_USER=${EIXO_SFTP_USER}
       - SFTP_PASS=${EIXO_SFTP_PASS}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - RABBITMQ_USER=${RABBITMQ_USER}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
+      - rabbitmq.exchange.name=radares_exchange
+      - rabbitmq.routing.key=radares.eixo
     networks:
       - radares-net
     restart: unless-stopped

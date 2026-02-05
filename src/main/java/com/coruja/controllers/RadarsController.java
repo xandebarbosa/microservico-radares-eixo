@@ -1,14 +1,20 @@
 package com.coruja.controllers;
 
-import com.coruja.dto.FilterOptionsDTO;
-import com.coruja.dto.RadarsDTO;
+import com.coruja.dto.*;
+import com.coruja.entities.KmPraca;
 import com.coruja.entities.Radars;
+import com.coruja.entities.Praca;
 import com.coruja.repositories.RadarsRepository;
+import com.coruja.services.GestaoRodoviaService;
 import com.coruja.services.RadarsService;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.web.PageableDefault;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -20,72 +26,125 @@ import java.util.List;
 
 @RestController
 @RequestMapping(value = "/radares")
-@CrossOrigin(origins = "http://localhost:3009")
+@CrossOrigin(origins = "${cors.origins}")
+@RequiredArgsConstructor
+@Slf4j
 public class RadarsController {
 
     private final RadarsService radarsService;
+    private final GestaoRodoviaService gestaoRodoviaService;
 
-    @Autowired
-    public RadarsController(RadarsService radarsService) {
-        this.radarsService = radarsService;
+    /**
+     * ✅ BUSCA POR PLACA
+     * Endpoint específico e otimizado para histórico completo de uma placa.
+     */
+    @GetMapping("/busca-placa")
+    public ResponseEntity<Page<RadarsDTO>> buscarPorPlaca(
+            @RequestParam String placa,
+            @PageableDefault(page = 0, size = 20, sort = "data", direction = Sort.Direction.DESC) Pageable pageable
+    ) {
+        return ResponseEntity.ok(radarsService.buscarPorPlaca(placa, pageable));
     }
 
     /**
-     * Endpoint UNIFICADO para buscar radares com filtros opcionais.
-     * O BFF usará este endpoint para todas as suas consultas.
-     * Exemplo de uso pelo BFF: /radares/filtros?placa=ABC1234&page=0&size=20
-     * Exemplo 2: /radares/filtros?rodovia=SP-300&data=2025-06-06&page=0&size=20
-     * Se nenhum parâmetro for passado, ele retorna todos os radares paginados.
+     * ✅ BUSCA POR LOCAL (FILTROS)
+     * Endpoint para consulta operacional (Dia, Rodovia, Km, Hora).
+     * 'Data' é obrigatória para performance (cai na partição correta).
      */
-    @GetMapping("/filtros")
-    public ResponseEntity<Page<RadarsDTO>> buscarComFiltros(
-            @RequestParam(required = false) String placa,
-            @RequestParam(required = false) String praca,
-            @RequestParam(required = false) String rodovia,
-            @RequestParam(required = false) String km,
-            @RequestParam(required = false) String sentido,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
+    @GetMapping("/busca-local")
+    public ResponseEntity<RadarPageDTO> buscarPorLocal(
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicial,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal,
-            @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "20") int size
-    ) {
-        PageRequest pageRequest = PageRequest.of(page, size);
-        Page<RadarsDTO> resultado = radarsService.buscarComFiltros(
-                placa, praca, rodovia, km, sentido, data, horaInicial, horaFinal, pageRequest
-        );
-        return  ResponseEntity.ok(resultado);
-    }
+            @RequestParam(required = false) String praca,
+            @RequestParam(required = false) String km,
+            @RequestParam(required = false) String sentido,
 
-    // O endpoint GET / que retorna TODOS os dados pode ser removido, pois
-    // chamar /filtros sem parâmetros tem o mesmo efeito. Vamos mantê-lo por compatibilidade.
-    @GetMapping
-    public ResponseEntity<Page<RadarsDTO>> getAllRadars(Pageable pageable) {
-        // Reutilizamos a nova lógica para manter o código DRY (Don't Repeat Yourself)
-        Page<RadarsDTO> result = radarsService.buscarComFiltros(null, null, null, null, null, null, null, null, pageable);
-        return ResponseEntity.ok(result);
+            // Paginação Padrão
+            @PageableDefault(size = 20, sort = {"data", "hora"}, direction = Sort.Direction.DESC) Pageable pageable
+    ) {
+        // Log para debug (verifique se o sentido aparece aqui no console)
+        log.info("🔍 [Cart Controller] Buscando Local | Data: {} | Praca: {} | Sentido: {}", data, praca, sentido);
+        RadarPageDTO resultado = radarsService.buscarPorLocal(
+                data,
+                horaInicial,
+                horaFinal,
+                praca,
+                km,
+                sentido,
+                pageable
+        );
+        return ResponseEntity.ok(resultado);
     }
 
     /**
-     * Endpoint para salvar leituras de radares e publicar no RabbitMQ.
-     *
-     * @param radar Lista de leituras de radares a serem salvas.
-     * @return Resposta de sucesso após processamento.
+     * Endpoint para busca Geoespacial (Latitude/Longitude).
+     * Exemplo de chamada:
+     * GET /radares/geo-search?lat=-22.89&lon=-48.45&data=2025-12-15&horaInicial=08:00&horaFinal=10:00&raio=500
      */
-    @PostMapping("/salvar")
-    public ResponseEntity<String> saveRadars(@RequestBody List<Radars> radar) {
-        radarsService.saveRadars(radar);
-        return ResponseEntity.status(HttpStatus.CREATED).body("Radares salvos com sucesso!");
+    public ResponseEntity<Page<RadarsDTO>> buscarPorLocalizacao(
+            @RequestParam("latitude") Double latitude,
+            @RequestParam("longitude") Double longitude,
+            @RequestParam(value = "raio", required = false, defaultValue = "15000") Double raio,
+
+            @RequestParam("data")
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
+
+            @RequestParam("horaInicio")
+            @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicio,
+
+            @RequestParam("horaFim")
+            @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFim,
+            @PageableDefault(page = 0, size = 20) Pageable pageable
+    ) {
+        Page<RadarsDTO> resultado = radarsService.buscarPorGeolocalizacao(
+                latitude, longitude, raio, data, horaInicio, horaFim, pageable
+        );
+        return ResponseEntity.ok(resultado);
     }
 
-    @GetMapping("/opcoes-filtro")
-    public ResponseEntity<FilterOptionsDTO> getFiltersOptions() {
-        return ResponseEntity.ok(radarsService.getFilterOptions());
+    // ==================================================================================
+    // 2. GESTÃO DE DOMÍNIOS (RODOVIAS E KMs) - NOVO
+    // ==================================================================================
+    @GetMapping("/praca")
+    public ResponseEntity<List<Praca>> listarPracas() {
+        return ResponseEntity.ok(gestaoRodoviaService.listarPracas());
     }
 
-    @GetMapping("/kms-por-rodovia")
-    public ResponseEntity<List<String>> getKmsByRodovia(@RequestParam String rodovia) {
-        return ResponseEntity.ok(radarsService.getKmsForRodovia(rodovia));
+    @PostMapping("/pracas")
+    public ResponseEntity<Praca> adicionarPraca(@RequestBody Praca praca) {
+        return ResponseEntity.ok(gestaoRodoviaService.salvarPraca(praca));
+    }
+
+    @DeleteMapping("/pracas/{id}")
+    public ResponseEntity<Void> removerPraca(@PathVariable Long id) {
+        gestaoRodoviaService.deletarPraca(id);
+        return ResponseEntity.noContent().build();
+    }
+
+    @GetMapping("/rodovias/{pracaId}/kms")
+    public ResponseEntity<List<KmPracaDTO>> listarKmsDaPraca(@PathVariable Long pracaId) {
+        return ResponseEntity.ok(gestaoRodoviaService.listarKmsPorPraca(pracaId));
+    }
+
+    @PostMapping("/kms")
+    public ResponseEntity<KmPraca> adicionarKm(@RequestBody KmPraca km) {
+        return ResponseEntity.ok(gestaoRodoviaService.salvarKm(km));
+    }
+
+    @DeleteMapping("/kms/{id}")
+    public ResponseEntity<Void> removerKm(@PathVariable Long id) {
+        gestaoRodoviaService.deletarKm(id);
+        return ResponseEntity.noContent().build();
+    }
+
+    // ==================================================================================
+    // 3. COMPATIBILIDADE / LEGADO (MAPA)
+    // ==================================================================================
+
+    @GetMapping("/all-locations")
+    public ResponseEntity<List<LocalizacaoRadarProjection>> getRadarLocations() {
+        return ResponseEntity.ok(radarsService.listarTodasLocalizacoes());
     }
 
 }

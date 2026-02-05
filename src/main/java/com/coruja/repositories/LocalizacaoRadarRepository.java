@@ -1,5 +1,6 @@
 package com.coruja.repositories;
 
+import com.coruja.dto.LocalizacaoRadarProjection;
 import com.coruja.entities.LocalizacaoRadar;
 import com.coruja.entities.Radars;
 import org.springframework.data.domain.Page;
@@ -12,6 +13,7 @@ import org.springframework.stereotype.Repository;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.util.List;
 import java.util.Optional;
 
 @Repository
@@ -20,6 +22,16 @@ public interface LocalizacaoRadarRepository extends JpaRepository<LocalizacaoRad
     // Busca uma localização pela combinação de rodovia e km
     Optional<LocalizacaoRadar> findByRodoviaAndKm(String rodovia, String km);
 
-    // Busca uma localização pela praça de pedágio
-    Optional<LocalizacaoRadar> findByPraca(String praca);
+    @Query(value = """
+            SELECT
+            id,
+            concessionaria,
+            rodovia,
+            km,
+            praca,
+            ST_Y(localizacao::geometry) as latitude,
+            ST_X(localizacao::geometry) as longitude
+            FROM localizacao_radar
+            """, nativeQuery = true)
+    List<LocalizacaoRadarProjection> findAllLocations();
 }
