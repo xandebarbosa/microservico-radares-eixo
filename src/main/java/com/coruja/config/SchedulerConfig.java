@@ -1,5 +1,6 @@
 package com.coruja.config;
 
+import lombok.extern.slf4j.Slf4j;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
@@ -12,9 +13,8 @@ import org.springframework.scheduling.config.ScheduledTaskRegistrar;
 
 @Configuration
 @EnableScheduling
+@Slf4j
 public class SchedulerConfig implements SchedulingConfigurer {
-
-    private static final Logger logger = LoggerFactory.getLogger(SchedulerConfig.class);
 
     @Override
     public void configureTasks(ScheduledTaskRegistrar taskRegistrar) {
@@ -25,13 +25,13 @@ public class SchedulerConfig implements SchedulingConfigurer {
     // A mágica acontece aqui: Expor como @Bean garante que o Spring
     // substitua o agendador padrão em todo o contexto da aplicação.
     @Bean(name = "taskSchedulerEixo")
-    private ThreadPoolTaskScheduler taskScheduler() {
+    public ThreadPoolTaskScheduler taskScheduler() {
         ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
         scheduler.setPoolSize(5);
         scheduler.setThreadNamePrefix("coruja-task-eixo-");
 
         // Impede que uma exceção em um job pare o agendador inteiro
-        scheduler.setErrorHandler(t -> logger.error("Erro inesperado no Scheduler: ", t));
+        scheduler.setErrorHandler(t -> log.error("Erro inesperado no Scheduler: ", t));
 
         // Garante que o app espere os jobs terminarem ao desligar
         scheduler.setWaitForTasksToCompleteOnShutdown(true);

@@ -147,13 +147,4 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
         """, nativeQuery = true)
     List<String> findDistinctKmsByRodoviaOtimizado(@Param("rodovia") String rodovia);
 
-    @Query(value = """
-        SELECT DISTINCT sentido FROM radars_eixo
-        WHERE data >= CURRENT_DATE - INTERVAL '30 days'
-        AND sentido IS NOT NULL
-        ORDER BY sentido
-        """, nativeQuery = true)
-    List<String> findDistinctSentidosOtimizado();
-
-
 }

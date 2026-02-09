@@ -284,7 +284,4 @@ public class RadarsService {
                 .sentido(Sentido.fromString(radars.getSentido()))
                 .build();
     }
-
-//    public Page<RadarsDTO> buscarComFiltros(String placa, String praca, String rodovia, String km, String sentido, LocalDate data, LocalTime horaInicial, LocalTime horaFinal, PageRequest pageRequest) {
-//    }
 }

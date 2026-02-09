@@ -3,7 +3,6 @@ package com.coruja.services;
 import com.coruja.dto.KmPracaDTO;
 import com.coruja.entities.KmPraca;
 import com.coruja.entities.Praca;
-import com.coruja.entities.Rodovia;
 import com.coruja.repositories.KmPracaRepository;
 import com.coruja.repositories.PracaRepository;
 import lombok.RequiredArgsConstructor;

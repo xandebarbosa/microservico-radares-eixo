@@ -7,16 +7,12 @@ import com.jcraft.jsch.ChannelSftp;
 import com.jcraft.jsch.JSch;
 import com.jcraft.jsch.Session;
 import com.jcraft.jsch.SftpException;
-import org.apache.commons.net.ftp.FTPClient;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import java.io.BufferedReader;
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -28,7 +24,6 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
-import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -36,9 +31,8 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @Service
+@Slf4j
 public class SftpService {
-
-    private static final Logger logger = LoggerFactory.getLogger(SftpService.class);
 
     @Value("${sftp.host}")
     private String sftpHost;
@@ -52,10 +46,11 @@ public class SftpService {
     private String remoteDirectory;
     @Value("${sftp.local.directory}")
     private String localDirectory;
-    @Value("${sftp.schedule.rate.ms}")
-    private long scheduleRateMs;
+    @Value("${sftp.timeout:30000}") // 30 segundos de timeout
+    private int sftpTimeout;
 
-    private LocalDateTime lastExecutionTime;
+    // Cache temporário para evitar milhares de consultas ao banco por arquivo
+    private Map<String, LocalizacaoRadar> localizacaoCache = new HashMap<>();
 
     private final RadarsService radarsService;
     private final LocalizacaoRadarRepository localizacaoRadarRepository;
@@ -68,205 +63,222 @@ public class SftpService {
 
     @Scheduled(fixedRateString = "${sftp.schedule.rate.ms}")
     public void processarSftpEixo() {
+        LocalDateTime lastExecutionTime = LocalDateTime.now();
+        log.info("Iniciando verificação de arquivos no SFTP (Eixo) às {}...", lastExecutionTime);
 
-        lastExecutionTime = LocalDateTime.now();
-        //LocalDateTime horaInicio = LocalDateTime.now();
-        logger.info("Iniciando verificação de arquivos no SFTP (Eixo) às {}...", lastExecutionTime);
-
-        JSch jsch = new JSch();
         Session session = null;
         ChannelSftp sftpChannel = null;
 
-        FTPClient ftpClient = new FTPClient();
-
         try {
-            // Lógica de conexão encapsulada
+            // 1. CARREGAR CACHE: Busca todas as localizações antes de processar as linhas
+            // Isso evita o erro de "Connection Reset" por excesso de queries pequenas.
+            carregarCacheLocalizacoes();
+
+            // 2. Tentar conexão com lógica de retry manual simples ou tratamento de erro
             session = conectarSessaoSftp();
+            if (session == null || !session.isConnected()) {
+                log.error("❌ Falha crítica: Não foi possível estabelecer conexão com o servidor SFTP.");
+                return;
+            }
+
             sftpChannel = abrirCanalSftp(session);
             sftpChannel.cd(remoteDirectory);
 
             Path localPath = Path.of(localDirectory);
             Files.createDirectories(localPath);
 
-            // Lógica de listagem e filtragem otimizada
             Set<String> arquivosLocais = listarArquivosLocais(localPath);
             Vector<ChannelSftp.LsEntry> arquivosRemotos = sftpChannel.ls(".");
 
             if (arquivosRemotos.isEmpty()) {
-                logger.info("Nenhum arquivo encontrado no diretório do SFTP.");
+                log.info("Nenhum arquivo encontrado no diretório do SFTP.");
                 return;
             }
 
-            // ADAPTADO: Lógica de filtro por data para o formato do Eixo
-            LocalDate dataLimite = LocalDate.now().minusDays(1); // Para testes, usando 10 dias
-            logger.info("Definida data limite para processamento: {}", dataLimite.format(DateTimeFormatter.ISO_LOCAL_DATE));
-
+            LocalDate dataLimite = LocalDate.now().minusDays(1);
             List<ChannelSftp.LsEntry> novosArquivos = arquivosRemotos.stream()
-                    .filter(entry -> !entry.getAttrs().isDir() && !entry.getFilename().startsWith(".")) // Ignora diretórios e arquivos ocultos
+                    .filter(entry -> !entry.getAttrs().isDir() && !entry.getFilename().startsWith("."))
                     .filter(entry -> !arquivosLocais.contains(entry.getFilename()))
                     .filter(entry -> isDentroDoPeriodo(entry.getFilename(), dataLimite))
                     .collect(Collectors.toList());
 
             if (novosArquivos.isEmpty()) {
-                logger.warn("FILTRAGEM COMPLETA: Nenhum arquivo novo foi encontrado dentro do período para processar.");
+                log.warn("Nenhum arquivo novo dentro do período para processar.");
                 return;
             }
 
-            logger.info("NOVOS ARQUIVOS PARA PROCESSAR: {}", novosArquivos.stream().map(ChannelSftp.LsEntry::getFilename).collect(Collectors.toList()));
             List<Radars> todosOsRadares = new ArrayList<>();
-
             for (ChannelSftp.LsEntry entry : novosArquivos) {
                 baixarArquivo(sftpChannel, entry.getFilename(), localPath).ifPresent(arquivoLocal -> {
-                    logger.info("Processando o conteúdo do arquivo: {}", entry.getFilename());
                     List<Radars> radaresDoArquivo = processarArquivoLocal(arquivoLocal);
-                    logger.info("Arquivo '{}' continha {} registros válidos.", entry.getFilename(), radaresDoArquivo.size());
                     todosOsRadares.addAll(radaresDoArquivo);
                 });
             }
 
             if (!todosOsRadares.isEmpty()) {
-                logger.info("SALVANDO NO BANCO: {} novos registros de radares.", todosOsRadares.size());
                 radarsService.saveRadars(todosOsRadares);
-                logger.info("Banco de dados atualizado com sucesso.");
-            } else {
-                logger.warn("Nenhum registro válido foi extraído dos novos arquivos processados.");
+                log.info("Sucesso: {} registros processados.", todosOsRadares.size());
             }
 
+        } catch (com.jcraft.jsch.JSchException e) {
+            log.error("🌐 Erro de conexão SFTP (Internet/Servidor fora): {}", e.getMessage());
+        } catch (SftpException e) {
+            log.error("📁 Erro de permissão ou diretório no SFTP: {}", e.getMessage());
         } catch (Exception e) {
-            logger.error("ERRO CRÍTICO durante o processamento do SFTP: ", e);
+            log.error("⚠️ Erro inesperado no processamento SFTP: ", e);
         } finally {
             desconectarSftp(sftpChannel, session);
-//            LocalDateTime proximaExecucao = horaInicio.plus(scheduleRateMs, ChronoUnit.MILLIS);
-//            logger.info("Processo finalizado. Próxima execução agendada para: {}",
-//                    proximaExecucao.format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss")));
-//            logger.info("*******************************************\n");
-            logger.info("*** Processamento finalizado ***");
-            logger.info("*** Proxima execução em: 05:00");
+            localizacaoCache.clear(); // Limpa o cache para liberar memória
+            log.info("*** Processamento finalizado ***");
         }
     }
 
-    @Scheduled(fixedDelay = 1000) // Atualiza a cada segundo
-    public void updateCountdown() {
-        if (lastExecutionTime != null) {
-            long secondsRemaining = 300 - ChronoUnit.SECONDS.between(lastExecutionTime, LocalDateTime.now());
-            if (secondsRemaining > 0) {
-                System.out.printf("\rPróxima execução em: %02d:%02d",
-                        secondsRemaining / 60,
-                        secondsRemaining % 60);
-            } else {
-                System.out.print("\rPróxima execução em: 00:00 - Iniciando...");
-            }
+    private void carregarCacheLocalizacoes() {
+        log.info("🧠 Carregando localizações para cache em memória...");
+        try {
+            List<LocalizacaoRadar> lista = localizacaoRadarRepository.findAll();
+            this.localizacaoCache = lista.stream()
+                    .collect(Collectors.toMap(
+                            l -> gerarChaveCache(l.getRodovia(), l.getKm()),
+                            l -> l,
+                            (existente, novo) -> existente // Em caso de duplicata no banco, mantém o primeiro
+                    ));
+            log.info("🧠 Cache carregado com {} localizações.", localizacaoCache.size());
+        } catch (Exception e) {
+            log.error("Falha ao carregar cache de localizações: ", e);
         }
     }
 
-    // LÓGICA MANTIDA E REFINADA: Parsing específico para o formato do Eixo (delimitado por ';')
+    private String gerarChaveCache(String rodovia, String km) {
+        if (rodovia == null) rodovia = "";
+        if (km == null) km = "";
+        // Normaliza para evitar erros de espaços ou caixa alta/baixa
+        return (rodovia.trim() + "|" + km.trim()).toUpperCase();
+    }
+
     private Radars parseLine(String linha) {
-        // Usa split por ';', que é mais seguro que por espaços
-        String[] dados = linha.split(";", -1); // -1 para incluir campos vazios no final
+        String[] dados = linha.split(";", -1);
 
-        if (dados.length < 5) {
-            logger.warn("Linha ignorada: número de colunas insuficiente (esperado >= 5, encontrado {}). Linha: '{}'", dados.length, linha);
-            return null;
-        }
+        if (dados.length < 4) return null;
 
         try {
             String dataHoraStr = dados[0].trim();
-            String placa = tratarPlaca(dados[1].trim()); // Lógica de tratamento de placa específica do Eixo
+            String placa = tratarPlaca(dados[1].trim());
             String praca = dados[2].trim().replaceAll("\\s+", " ");
             String sentido = dados[3].trim().replaceAll("\\s+", " ");
 
             String[] dataHoraSplit = dataHoraStr.split("T");
-            if (dataHoraSplit.length != 2) {
-                logger.warn("Formato de data/hora inválido (esperado 'yyyy-MM-ddTHH:mm:ss'), ignorando linha: '{}'", linha);
-                return null;
-            }
+            LocalDate data = LocalDate.parse(dataHoraSplit[0]);
+            LocalTime hora = LocalTime.parse(dataHoraSplit[1]);
 
-            LocalDate data = LocalDate.parse(dataHoraSplit[0], DateTimeFormatter.ofPattern("yyyy-MM-dd"));
-            LocalTime hora = LocalTime.parse(dataHoraSplit[1], DateTimeFormatter.ofPattern("HH:mm:ss"));
-
+            // No padrão Eixo, a rodovia vem no campo da Praça
             String rodovia = praca;
-            String km = "";
+            String km = ""; // Campo vazio conforme seu log de exemplo
 
-            // 1. Busca na tabela "De-Para" pelo objeto de localização completo.
-            LocalizacaoRadar localizacaoDoRadar = localizacaoRadarRepository.findByRodoviaAndKm(rodovia, km)
-                    .orElse(null);
+            // BUSCA NO CACHE (Sem bater no banco de dados)
+            LocalizacaoRadar localizacaoDoRadar = localizacaoCache.get(gerarChaveCache(rodovia, km));
 
             if (localizacaoDoRadar == null) {
-                logger.warn("Não foi encontrada uma localização cadastrada para a rodovia: '{}'", rodovia);
+                log.debug("Localização não encontrada no cache para: {}/{}", rodovia, km);
             }
 
-            // Assumindo que a entidade Radars pode ser criada sem rodovia e km, ou eles podem ser nulos/vazios.
             return new Radars(data, hora, placa, praca, rodovia, km, sentido, localizacaoDoRadar);
         } catch (Exception e) {
-            logger.error("Erro fatal ao converter dados da linha: '{}'. Causa: {}", linha, e.getMessage());
+            log.error("Erro no parsing da linha: {}. Causa: {}", linha, e.getMessage());
             return null;
         }
     }
 
-    // LÓGICA MANTIDA: Tratamento de placa específico deste serviço
+    // --- MANTIDOS MÉTODOS AUXILIARES (tratarPlaca, baixarArquivo, etc) ---
     private String tratarPlaca(String placa) {
-        if (placa == null || placa.isBlank()) {
-            return "N/I"; // Retorna um valor padrão para placas vazias
-        }
+        if (placa == null || placa.isBlank()) return "N/I";
         placa = placa.replaceAll("[^a-zA-Z0-9]", "").toUpperCase();
         return placa.length() > 7 ? placa.substring(0, 7) : placa;
     }
 
-    // ADAPTADO: Lógica de extração de data para o formato yyyyMMdd
+    private boolean isDentroDoPeriodo(String nomeArquivo, LocalDate dataLimite) {
+        return extrairDataDoNome(nomeArquivo)
+                .map(dataArquivo -> !dataArquivo.isBefore(dataLimite))
+                .orElse(false);
+    }
+
     private Optional<LocalDate> extrairDataDoNome(String nomeArquivo) {
         try {
-            Pattern pattern = Pattern.compile("(\\d{8})"); // Encontra uma sequência de 8 dígitos
+            Pattern pattern = Pattern.compile("(\\d{8})");
             Matcher matcher = pattern.matcher(nomeArquivo);
             if (matcher.find()) {
                 return Optional.of(LocalDate.parse(matcher.group(1), DateTimeFormatter.ofPattern("yyyyMMdd")));
             }
         } catch (DateTimeParseException e) {
-            logger.warn("Não foi possível parsear a data do nome do arquivo '{}': {}", nomeArquivo, e.getMessage());
+            log.warn("Data inválida no arquivo: {}", nomeArquivo);
         }
         return Optional.empty();
     }
 
-    // NOVO: Métodos auxiliares para organizar o código
-    private boolean isDentroDoPeriodo(String nomeArquivo, LocalDate dataLimite) {
-        return extrairDataDoNome(nomeArquivo)
-                .map(dataArquivo -> !dataArquivo.isBefore(dataLimite))
-                .orElse(false); // Se não conseguir extrair a data, ignora o arquivo
-    }
-
     private List<Radars> processarArquivoLocal(Path arquivoLocal) {
+//        try (Stream<String> lines = Files.lines(arquivoLocal, StandardCharsets.UTF_8)) {
+//            return lines.map(this::parseLine).filter(Objects::nonNull).collect(Collectors.toList());
+//        } catch (IOException e) {
+//            log.error("Erro ao ler arquivo: {}", arquivoLocal, e);
+//            return Collections.emptyList();
+//        }
+        log.info("📂 Abrindo arquivo para processamento: {}", arquivoLocal.getFileName());
+
         try (Stream<String> lines = Files.lines(arquivoLocal, StandardCharsets.UTF_8)) {
-            return lines.map(this::parseLine).filter(Objects::nonNull).collect(Collectors.toList());
+            // Log das primeiras 3 linhas brutas do arquivo para conferência de formato
+            List<String> amostraBruta = Files.lines(arquivoLocal, StandardCharsets.UTF_8)
+                    .limit(3)
+                    .collect(Collectors.toList());
+            log.info("📝 Amostra do conteúdo bruto (Primeiras 3 linhas):");
+            amostraBruta.forEach(l -> log.info("   > {}", l));
+
+            List<Radars> resultado = lines.map(this::parseLine)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
+
+            // Log de conferência dos objetos mapeados (Amostra de 2 registros)
+            if (!resultado.isEmpty()) {
+                log.info("✅ Mapeamento bem sucedido. Exemplo de dados processados:");
+                resultado.stream().limit(2).forEach(r ->
+                        log.info("   [OBJETO] Data: {}, Placa: {}, Localidade: {}",
+                                r.getData(), r.getPlaca(), r.getPraca())
+                );
+            }
+
+            return resultado;
         } catch (IOException e) {
-            logger.error("Falha ao ler o arquivo local: {}", arquivoLocal, e);
+            log.error("❌ Erro ao ler arquivo: {}", arquivoLocal, e);
             return Collections.emptyList();
         }
     }
 
     private Session conectarSessaoSftp() throws Exception {
-        JSch jsch = new JSch();
-        Session session = jsch.getSession(sftpUser, sftpHost, sftpPort);
-        session.setPassword(sftpPass);
-        session.setConfig("StrictHostKeyChecking", "no");
-        session.connect();
-        logger.info("Sessão SFTP conectada com sucesso.");
-        return session;
+        try {
+            JSch jsch = new JSch();
+            Session session = jsch.getSession(sftpUser, sftpHost, sftpPort);
+            session.setPassword(sftpPass);
+            session.setConfig("StrictHostKeyChecking", "no");
+
+            // ADICIONADO: Timeout para não deixar a thread travada eternamente se a internet cair
+            session.connect(sftpTimeout);
+
+            log.info("✅ Sessão SFTP conectada.");
+            return session;
+        } catch (Exception e) {
+            log.error("❌ Erro ao conectar no host {}: {}", sftpHost, e.getMessage());
+            throw e;
+        }
     }
 
     private ChannelSftp abrirCanalSftp(Session session) throws Exception {
         ChannelSftp sftpChannel = (ChannelSftp) session.openChannel("sftp");
         sftpChannel.connect();
-        logger.info("Canal SFTP aberto com sucesso.");
         return sftpChannel;
     }
 
     private void desconectarSftp(ChannelSftp channel, Session session) {
-        if (channel != null && channel.isConnected()) {
-            channel.disconnect();
-        }
-        if (session != null && session.isConnected()) {
-            session.disconnect();
-        }
-        logger.info("Conexão SFTP encerrada.");
+        if (channel != null && channel.isConnected()) channel.disconnect();
+        if (session != null && session.isConnected()) session.disconnect();
     }
 
     private Optional<Path> baixarArquivo(ChannelSftp sftpChannel, String nomeArquivo, Path diretorioLocal) {
@@ -275,7 +287,7 @@ public class SftpService {
             Files.copy(inputStream, arquivoLocal, StandardCopyOption.REPLACE_EXISTING);
             return Optional.of(arquivoLocal);
         } catch (Exception e) {
-            logger.error("Erro ao baixar arquivo {}: ", nomeArquivo, e);
+            log.error("Erro no download: {}", nomeArquivo);
             return Optional.empty();
         }
     }
@@ -285,7 +297,6 @@ public class SftpService {
         try (Stream<Path> stream = Files.list(diretorioLocal)) {
             return stream.filter(Files::isRegularFile).map(path -> path.getFileName().toString()).collect(Collectors.toSet());
         } catch (IOException e) {
-            logger.warn("Não foi possível listar arquivos locais. Downloads podem ser repetidos.", e);
             return Collections.emptySet();
         }
     }

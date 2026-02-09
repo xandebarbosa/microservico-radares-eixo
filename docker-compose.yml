@@ -29,7 +29,7 @@ services:
       - rabbitmq.routing.key=radares.eixo
     networks:
       - radares-net
-    restart: unless-stopped
+    restart: on-failure
 volumes:
   postgres-eixo-data:
   pgadmin-data: # <-- Adicionar o novo volume aqui
