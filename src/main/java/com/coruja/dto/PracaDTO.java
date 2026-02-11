@@ -5,14 +5,17 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.io.Serial;
 import java.io.Serializable;
 
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class KmPracaDTO implements Serializable {
+public class PracaDTO implements Serializable {
+    @Serial
+    private static final long serialVersionUID = 1L;
+
     private Long id;
-    private String valor;
-    private Long pracaId; // Trazendo apenas o ID, evitando o loop/erro do Hibertate
+    private String nome;
 }

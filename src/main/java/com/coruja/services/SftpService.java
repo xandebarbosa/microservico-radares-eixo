@@ -3,10 +3,7 @@ package com.coruja.services;
 import com.coruja.entities.LocalizacaoRadar;
 import com.coruja.entities.Radars;
 import com.coruja.repositories.LocalizacaoRadarRepository;
-import com.jcraft.jsch.ChannelSftp;
-import com.jcraft.jsch.JSch;
-import com.jcraft.jsch.Session;
-import com.jcraft.jsch.SftpException;
+import com.jcraft.jsch.*;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -54,11 +51,17 @@ public class SftpService {
 
     private final RadarsService radarsService;
     private final LocalizacaoRadarRepository localizacaoRadarRepository;
+    private final GestaoRodoviaService gestaoRodoviaService;
 
     @Autowired
-    public SftpService(RadarsService radarsService, LocalizacaoRadarRepository localizacaoRadarRepository) {
+    public SftpService(
+            RadarsService radarsService,
+            LocalizacaoRadarRepository localizacaoRadarRepository,
+            GestaoRodoviaService gestaoRodoviaService
+    ) {
         this.radarsService = radarsService;
         this.localizacaoRadarRepository = localizacaoRadarRepository;
+        this.gestaoRodoviaService = gestaoRodoviaService;
     }
 
     @Scheduled(fixedRateString = "${sftp.schedule.rate.ms}")
@@ -120,7 +123,7 @@ public class SftpService {
                 log.info("Sucesso: {} registros processados.", todosOsRadares.size());
             }
 
-        } catch (com.jcraft.jsch.JSchException e) {
+        } catch (JSchException e) {
             log.error("🌐 Erro de conexão SFTP (Internet/Servidor fora): {}", e.getMessage());
         } catch (SftpException e) {
             log.error("📁 Erro de permissão ou diretório no SFTP: {}", e.getMessage());
@@ -167,20 +170,20 @@ public class SftpService {
             String praca = dados[2].trim().replaceAll("\\s+", " ");
             String sentido = dados[3].trim().replaceAll("\\s+", " ");
 
+            String rodovia = "";
+            String km = ""; // Campo vazio conforme seu log de exemplo
+
             String[] dataHoraSplit = dataHoraStr.split("T");
             LocalDate data = LocalDate.parse(dataHoraSplit[0]);
             LocalTime hora = LocalTime.parse(dataHoraSplit[1]);
 
-            // No padrão Eixo, a rodovia vem no campo da Praça
-            String rodovia = praca;
-            String km = ""; // Campo vazio conforme seu log de exemplo
-
             // BUSCA NO CACHE (Sem bater no banco de dados)
-            LocalizacaoRadar localizacaoDoRadar = localizacaoCache.get(gerarChaveCache(rodovia, km));
+            LocalizacaoRadar localizacaoDoRadar = localizacaoCache.get(gerarChaveCache(praca, km));
 
             if (localizacaoDoRadar == null) {
-                log.debug("Localização não encontrada no cache para: {}/{}", rodovia, km);
+                log.debug("Localização não encontrada no cache para: {}", praca);
             }
+
 
             return new Radars(data, hora, placa, praca, rodovia, km, sentido, localizacaoDoRadar);
         } catch (Exception e) {
@@ -223,6 +226,8 @@ public class SftpService {
 //            return Collections.emptyList();
 //        }
         log.info("📂 Abrindo arquivo para processamento: {}", arquivoLocal.getFileName());
+        // Mapa para coletar descobertas de domínio (Praca -> Lista de KMs)
+        Map<String, Set<String>> descobertas = new HashMap<>();
 
         try (Stream<String> lines = Files.lines(arquivoLocal, StandardCharsets.UTF_8)) {
             // Log das primeiras 3 linhas brutas do arquivo para conferência de formato
@@ -232,9 +237,25 @@ public class SftpService {
             log.info("📝 Amostra do conteúdo bruto (Primeiras 3 linhas):");
             amostraBruta.forEach(l -> log.info("   > {}", l));
 
-            List<Radars> resultado = lines.map(this::parseLine)
+            List<Radars> resultado = lines.map(linha -> {
+                        Radars r = parseLine(linha);
+                        if (r != null) {
+                            // Adiciona ao mapa de descobertas para popular as tabelas de domínio
+                            descobertas.computeIfAbsent(r.getPraca(), k -> new HashSet<>()).add(r.getKm());
+                        }
+                        return r;
+                    })
                     .filter(Objects::nonNull)
                     .collect(Collectors.toList());
+
+            // CHAMA O APRENDIZADO DE DOMÍNIO (Popula as tabelas pracas e kms_praca)
+            if (!descobertas.isEmpty()) {
+                gestaoRodoviaService.registrarDescobertas(descobertas);
+            }
+
+            if (!resultado.isEmpty()) {
+                radarsService.saveRadars(resultado);
+            }
 
             // Log de conferência dos objetos mapeados (Amostra de 2 registros)
             if (!resultado.isEmpty()) {

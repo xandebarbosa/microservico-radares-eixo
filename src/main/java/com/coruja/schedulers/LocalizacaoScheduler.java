@@ -37,7 +37,7 @@ public class LocalizacaoScheduler {
 
         String sqlBatch = """
             WITH pending_batch AS (
-                SELECT id, data, praca, km
+                SELECT id, data, praca
                 FROM radars_eixo
                 WHERE localizacao_id IS NULL
                 LIMIT ?
@@ -49,8 +49,9 @@ public class LocalizacaoScheduler {
                     lr.id AS loc_id
                 FROM pending_batch pb
                 JOIN localizacao_radar lr
-                    ON REPLACE(TRIM(UPPER(pb.praca)), '-', '') = REPLACE(TRIM(UPPER(lr.praca)), '-', '')
-                    AND TRIM(pb.km) = SPLIT_PART(TRIM(lr.km), '+', 1)
+                    -- Compara as praças ignorando acentos e espaços extras
+                    ON unaccent(TRIM(UPPER(pb.praca))) = unaccent(TRIM(UPPER(lr.praca)))
+                    OR unaccent(TRIM(UPPER(pb.praca))) ILIKE CONCAT('%', unaccent(TRIM(UPPER(lr.praca))), '%')
             )
             UPDATE radars_eixo rc
             SET localizacao_id = mu.loc_id
