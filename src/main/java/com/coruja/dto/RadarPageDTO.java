@@ -13,7 +13,7 @@ import java.util.List;
 public class RadarPageDTO implements Serializable {
 
     //Lista de radares (DTOs já convertidos)
-    private List<RadarsDTO> content;
+    private List<RadarDTO> content;
 
     //Informaçoes de paginação
     private PageMetadata page;

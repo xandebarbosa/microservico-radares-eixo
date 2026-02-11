@@ -14,7 +14,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -69,7 +68,7 @@ public class RadarsService {
      * Busca ESPECÍFICA por placa.
      */
     @Transactional(readOnly = true)
-    public Page<RadarsDTO> buscarPorPlaca(String placa, Pageable pageable) {
+    public Page<RadarDTO> buscarPorPlaca(String placa, Pageable pageable) {
         if (placa == null || placa.isBlank()) {
             throw new IllegalArgumentException("O parâmetro 'placa' é obrigatório.");
         }
@@ -84,7 +83,7 @@ public class RadarsService {
      * @param data        Data do registro
      * @param horaInicial Hora inicial do intervalo
      * @param horaFinal   Hora final do intervalo
-     * @param praca       Praca da rodovia
+     * @param rodovia       Praca da rodovia
      * @param km          Quilômetro da rodovia
      * @param sentido     Sentido da via
      * @param pageable    Informações de paginação
@@ -95,19 +94,21 @@ public class RadarsService {
             LocalDate data,
             LocalTime horaInicial,
             LocalTime horaFinal,
-            String praca,
+            String rodovia,
             String km,
             String sentido,
             Pageable pageable
     ) {
-        log.info("🔎 Executando query no Banco: Data={}, Praca={}, km={}, Sentido={}", data, praca, km, sentido);
+        log.info("🔎 Executando query no Banco: Data={}, Rodovia={}, km={}, Sentido={}", data, rodovia, km, sentido);
+        String pracaFiltro;
+        pracaFiltro = rodovia;
 
         Page<Radars> page = radarsRepository.findByLocalFilter(
                 data,
                 horaInicial,
                 horaFinal,
                 null,
-                normalize(praca),
+                normalize(pracaFiltro),
                 normalize(km),
                 sentido,
                 pageable
@@ -120,7 +121,7 @@ public class RadarsService {
      */
     @Transactional(readOnly = true)
     @Timed(value = "radares.busca.geo", histogram = true)
-    public Page<RadarsDTO> buscarPorGeolocalizacao(
+    public Page<RadarDTO> buscarPorGeolocalizacao(
             Double latitude, Double longitude, Double raio,
             LocalDate data, LocalTime horaInicio, LocalTime horaFim,
             Pageable pageable) {
@@ -238,7 +239,7 @@ public class RadarsService {
      * Converte Page<Entity> para RadarPageDTO (Estrutura paginada para JSON)
      */
     private RadarPageDTO convertToPageDTO(Page<Radars> page) {
-        List<RadarsDTO> content = page.getContent().stream()
+        List<RadarDTO> content = page.getContent().stream()
                 .map(this::converterParaDTOBuscaLocal) // ✅ Reutiliza o conversor centralizado
                 .collect(Collectors.toList());
 
@@ -252,8 +253,8 @@ public class RadarsService {
         return new RadarPageDTO(content, metadata);
     }
 
-    private RadarsDTO converterParaDTOBuscaLocal(Radars radars) {
-        RadarsDTO dto = new RadarsDTO();
+    private RadarDTO converterParaDTOBuscaLocal(Radars radars) {
+        RadarDTO dto = new RadarDTO();
         dto.setId(radars.getId());
         dto.setData(radars.getData());
         dto.setHora(radars.getHora());
@@ -272,8 +273,8 @@ public class RadarsService {
         return dto;
     }
 
-    private RadarsDTO converterParaDTO(Radars radars) {
-        return RadarsDTO.builder()
+    private RadarDTO converterParaDTO(Radars radars) {
+        return RadarDTO.builder()
                 .id(radars.getId())
                 .data(radars.getData())
                 .hora(radars.getHora())

@@ -1,6 +1,7 @@
 package com.coruja.dto;
 
 import com.coruja.enuns.Sentido;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.*;
 
 import java.time.LocalDate;
@@ -11,7 +12,8 @@ import java.time.LocalTime;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class RadarsDTO {
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class RadarDTO {
     private Long id;
     private LocalDate data;
     private LocalTime hora;
