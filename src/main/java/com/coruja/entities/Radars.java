@@ -49,7 +49,7 @@ public class Radars {
         this.hora = hora;
         this.placa = placa;
         this.praca = praca;
-        this.rodovia = rodovia != null ? rodovia : "";
+        this.rodovia = rodovia;
         this.km = km != null ? km : "";
         this.sentido = sentido;
         this.localizacao = localizacao;

@@ -5,7 +5,7 @@ import jakarta.persistence.*;
 import lombok.*;
 
 @Entity
-@Table(name = "kms_praca", indexes = {
+@Table(name = "kms_rodovia", indexes = {
         @Index(name = "idx_km_valor", columnList = "valor")
 })
 @Getter
@@ -13,7 +13,7 @@ import lombok.*;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class KmPraca {
+public class KmRodovia {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
@@ -22,8 +22,8 @@ public class KmPraca {
     private String valor;
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "praca_id", nullable = false)
+    @JoinColumn(name = "rodovia_id", nullable = false)
     @JsonIgnore // <--- ADICIONADO: Impede o erro de serialização do Proxy
     @ToString.Exclude // <--- ADICIONADO: Evita loops no Lombok
-    private Praca praca;
+    private Rodovia rodovia;
 }

@@ -167,10 +167,10 @@ public class SftpService {
         try {
             String dataHoraStr = dados[0].trim();
             String placa = tratarPlaca(dados[1].trim());
-            String praca = dados[2].trim().replaceAll("\\s+", " ");
+            String rodovia = dados[2].trim().replaceAll("\\s+", " ");
             String sentido = dados[3].trim().replaceAll("\\s+", " ");
 
-            String rodovia = "";
+            String praca = "";
             String km = ""; // Campo vazio conforme seu log de exemplo
 
             String[] dataHoraSplit = dataHoraStr.split("T");
@@ -185,7 +185,7 @@ public class SftpService {
             }
 
 
-            return new Radars(data, hora, placa, praca, rodovia, km, sentido, localizacaoDoRadar);
+            return new Radars(data, hora, placa, rodovia, praca, km, sentido, localizacaoDoRadar);
         } catch (Exception e) {
             log.error("Erro no parsing da linha: {}. Causa: {}", linha, e.getMessage());
             return null;
@@ -219,12 +219,7 @@ public class SftpService {
     }
 
     private List<Radars> processarArquivoLocal(Path arquivoLocal) {
-//        try (Stream<String> lines = Files.lines(arquivoLocal, StandardCharsets.UTF_8)) {
-//            return lines.map(this::parseLine).filter(Objects::nonNull).collect(Collectors.toList());
-//        } catch (IOException e) {
-//            log.error("Erro ao ler arquivo: {}", arquivoLocal, e);
-//            return Collections.emptyList();
-//        }
+
         log.info("📂 Abrindo arquivo para processamento: {}", arquivoLocal.getFileName());
         // Mapa para coletar descobertas de domínio (Praca -> Lista de KMs)
         Map<String, Set<String>> descobertas = new HashMap<>();
@@ -241,7 +236,7 @@ public class SftpService {
                         Radars r = parseLine(linha);
                         if (r != null) {
                             // Adiciona ao mapa de descobertas para popular as tabelas de domínio
-                            descobertas.computeIfAbsent(r.getPraca(), k -> new HashSet<>()).add(r.getKm());
+                            descobertas.computeIfAbsent(r.getRodovia(), k -> new HashSet<>()).add(r.getKm());
                         }
                         return r;
                     })
@@ -262,7 +257,7 @@ public class SftpService {
                 log.info("✅ Mapeamento bem sucedido. Exemplo de dados processados:");
                 resultado.stream().limit(2).forEach(r ->
                         log.info("   [OBJETO] Data: {}, Placa: {}, Localidade: {}",
-                                r.getData(), r.getPlaca(), r.getPraca())
+                                r.getData(), r.getPlaca(), r.getRodovia())
                 );
             }
 

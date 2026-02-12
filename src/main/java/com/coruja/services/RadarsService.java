@@ -68,7 +68,7 @@ public class RadarsService {
      * Busca ESPECÍFICA por placa.
      */
     @Transactional(readOnly = true)
-    public Page<RadarDTO> buscarPorPlaca(String placa, Pageable pageable) {
+    public Page<RadarsDTO> buscarPorPlaca(String placa, Pageable pageable) {
         if (placa == null || placa.isBlank()) {
             throw new IllegalArgumentException("O parâmetro 'placa' é obrigatório.");
         }
@@ -100,15 +100,13 @@ public class RadarsService {
             Pageable pageable
     ) {
         log.info("🔎 Executando query no Banco: Data={}, Rodovia={}, km={}, Sentido={}", data, rodovia, km, sentido);
-        String pracaFiltro;
-        pracaFiltro = rodovia;
 
         Page<Radars> page = radarsRepository.findByLocalFilter(
                 data,
                 horaInicial,
                 horaFinal,
                 null,
-                normalize(pracaFiltro),
+                normalize(rodovia),
                 normalize(km),
                 sentido,
                 pageable
@@ -121,7 +119,7 @@ public class RadarsService {
      */
     @Transactional(readOnly = true)
     @Timed(value = "radares.busca.geo", histogram = true)
-    public Page<RadarDTO> buscarPorGeolocalizacao(
+    public Page<RadarsDTO> buscarPorGeolocalizacao(
             Double latitude, Double longitude, Double raio,
             LocalDate data, LocalTime horaInicio, LocalTime horaFim,
             Pageable pageable) {
@@ -239,7 +237,7 @@ public class RadarsService {
      * Converte Page<Entity> para RadarPageDTO (Estrutura paginada para JSON)
      */
     private RadarPageDTO convertToPageDTO(Page<Radars> page) {
-        List<RadarDTO> content = page.getContent().stream()
+        List<RadarsDTO> content = page.getContent().stream()
                 .map(this::converterParaDTOBuscaLocal) // ✅ Reutiliza o conversor centralizado
                 .collect(Collectors.toList());
 
@@ -253,8 +251,8 @@ public class RadarsService {
         return new RadarPageDTO(content, metadata);
     }
 
-    private RadarDTO converterParaDTOBuscaLocal(Radars radars) {
-        RadarDTO dto = new RadarDTO();
+    private RadarsDTO converterParaDTOBuscaLocal(Radars radars) {
+        RadarsDTO dto = new RadarsDTO();
         dto.setId(radars.getId());
         dto.setData(radars.getData());
         dto.setHora(radars.getHora());
@@ -273,8 +271,8 @@ public class RadarsService {
         return dto;
     }
 
-    private RadarDTO converterParaDTO(Radars radars) {
-        return RadarDTO.builder()
+    private RadarsDTO converterParaDTO(Radars radars) {
+        return RadarsDTO.builder()
                 .id(radars.getId())
                 .data(radars.getData())
                 .hora(radars.getHora())

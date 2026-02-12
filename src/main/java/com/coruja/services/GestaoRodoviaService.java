@@ -1,10 +1,10 @@
 package com.coruja.services;
 
-import com.coruja.dto.KmPracaDTO;
-import com.coruja.entities.KmPraca;
-import com.coruja.entities.Praca;
-import com.coruja.repositories.KmPracaRepository;
-import com.coruja.repositories.PracaRepository;
+import com.coruja.dto.KmRodoviaDTO;
+import com.coruja.entities.KmRodovia;
+import com.coruja.entities.Rodovia;
+import com.coruja.repositories.KmRodoviaRepository;
+import com.coruja.repositories.RodoviaRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.annotation.CacheEvict;
@@ -20,49 +20,49 @@ import java.util.stream.Collectors;
 @Slf4j
 @RequiredArgsConstructor
 public class GestaoRodoviaService {
-    private final PracaRepository pracaRepository;
-    private final KmPracaRepository kmRepository;
+    private final RodoviaRepository rodoviaRepository;
+    private final KmRodoviaRepository kmRepository;
 
     // ✅ Cache Thread-safe de nível de classe para evitar batida no banco e race conditions
-    private final ConcurrentHashMap<String, Praca> pracaCache = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<Long, Set<String>> kmCachePorPraca = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Rodovia> rodoviaCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, Set<String>> kmCachePorRodovia = new ConcurrentHashMap<>();
 
-    //@Cacheable(value = "lista-pracas")
-    public List<Praca> listarPracas() {
+    //@Cacheable(value = "lista-rodovias")
+    public List<Rodovia> listarRodovias() {
         // Se o cache estiver vazio, tenta carregar do banco
-        if (pracaCache.isEmpty()) {
-            log.info("🚚 Cache de pracas vazio, carregando do banco de dados...");
-            List<Praca> doBanco = pracaRepository.findAll();
-            doBanco.forEach(r -> pracaCache.putIfAbsent(r.getNome(), r));
+        if (rodoviaCache.isEmpty()) {
+            log.info("🚚 Cache de rodovias vazio, carregando do banco de dados...");
+            List<Rodovia> doBanco = rodoviaRepository.findAll();
+            doBanco.forEach(r -> rodoviaCache.putIfAbsent(r.getNome(), r));
         }
 
         // Retorna a lista a partir dos valores do cache
-        return new ArrayList<>(pracaCache.values());
+        return new ArrayList<>(rodoviaCache.values());
     }
 
     @Transactional
-    @CacheEvict(value = "lista-pracas", allEntries = true)
-    public Praca salvarPraca(Praca praca) {
+    @CacheEvict(value = "lista-rodovias", allEntries = true)
+    public Rodovia salvarRodovia(Rodovia rodovia) {
         // Verifica existência para evitar duplicidade
-        if (pracaRepository.existsByNome(praca.getNome())) {
-            throw new IllegalArgumentException("Praca já existe.");
+        if (rodoviaRepository.existsByNome(rodovia.getNome())) {
+            throw new IllegalArgumentException("Rodovia já existe.");
         }
-        Praca salva = pracaRepository.save(praca);
-        pracaCache.put(salva.getNome(), salva); // Atualiza cache imediatamente
+        Rodovia salva = rodoviaRepository.save(rodovia);
+        rodoviaCache.put(salva.getNome(), salva); // Atualiza cache imediatamente
         return salva;
     }
 
     @Transactional
-    public void deletarPraca(Long id) {
-        pracaRepository.findById(id).ifPresent(r -> pracaCache.remove(r.getNome()));
-        kmCachePorPraca.remove(id);
-        pracaRepository.deleteById(id);
+    public void deletarRodovia(Long id) {
+        rodoviaRepository.findById(id).ifPresent(r -> rodoviaCache.remove(r.getNome()));
+        kmCachePorRodovia.remove(id);
+        rodoviaRepository.deleteById(id);
     }
 
     // --- KMs ---
-    @Cacheable(value = "lista-kms", key = "#pracaId")
-    public List<KmPracaDTO> listarKmsPorPraca(Long pracaId) {
-        List<KmPraca> kms = kmRepository.findByPracaId(pracaId);
+    @Cacheable(value = "lista-kms", key = "#rodoviaId")
+    public List<KmRodoviaDTO> listarKmsPorRodovia(Long rodoviaId) {
+        List<KmRodovia> kms = kmRepository.findByRodoviaId(rodoviaId);
 
         // Converte para DTO antes de cachear/retornar
         return kms.stream()
@@ -71,8 +71,8 @@ public class GestaoRodoviaService {
     }
 
     @Transactional
-    @CacheEvict(value = "lista-kms", key = "#km.praca.id")
-    public KmPraca salvarKm(KmPraca km) {
+    @CacheEvict(value = "lista-kms", key = "#km.rodovia.id")
+    public KmRodovia salvarKm(KmRodovia km) {
         return kmRepository.save(km);
     }
 
@@ -83,44 +83,44 @@ public class GestaoRodoviaService {
     }
 
     // Método auxiliar de conversão
-    private KmPracaDTO toDTO(KmPraca entity) {
-        return new KmPracaDTO(
+    private KmRodoviaDTO toDTO(KmRodovia entity) {
+        return new KmRodoviaDTO(
                 entity.getId(),
                 entity.getValor(),
-                entity.getPraca().getId()
+                entity.getRodovia().getId()
         );
     }
 
     /**
      * ✅ MÉTODO NOVO: APRENDIZADO EM LOTE
-     * Recebe um Mapa: Chave = Nome da Praca, Valor = Lista de KMs encontrados
+     * Recebe um Mapa: Chave = Nome da Rodovia, Valor = Lista de KMs encontrados
      */
     @Transactional
-    @CacheEvict(value = {"lista-pracas", "lista-kms"}, allEntries = true)
+    @CacheEvict(value = {"lista-rodovias", "lista-kms"}, allEntries = true)
     public void registrarDescobertas(Map<String, Set<String>> descobertas) {
         if (descobertas.isEmpty()) return;
 
-        log.info("🧠 Aprendizado de domínio: Processando {} pracas...", descobertas.size());
+        log.info("🧠 Aprendizado de domínio: Processando {} rodovias...", descobertas.size());
 
         // 1. Inicialização preguiçosa (Lazy Load) do cache se estiver vazio
-        if (pracaCache.isEmpty()) {
-            pracaRepository.findAll().forEach(r -> pracaCache.put(r.getNome(), r));
+        if (rodoviaCache.isEmpty()) {
+            rodoviaRepository.findAll().forEach(r -> rodoviaCache.put(r.getNome(), r));
         }
 
-        List<KmPraca> novosKmsParaSalvar = new ArrayList<>();
+        List<KmRodovia> novosKmsParaSalvar = new ArrayList<>();
 
-        descobertas.forEach((nomePraca, listaKms) -> {
-            // ✅ Uso de computeIfAbsent para garantir que apenas UMA thread crie a praca
-            Praca praca = pracaCache.computeIfAbsent(nomePraca, nome -> {
-                log.info("🆕 Registrando nova Praca no domínio: {}", nome);
-                return pracaRepository.save(Praca.builder().nome(nome).build());
+        descobertas.forEach((nomeRodovia, listaKms) -> {
+            // ✅ Uso de computeIfAbsent para garantir que apenas UMA thread crie a rodovia
+            Rodovia rodovia = rodoviaCache.computeIfAbsent(nomeRodovia, nome -> {
+                log.info("🆕 Registrando nova Rodovia no domínio: {}", nome);
+                return rodoviaRepository.save(Rodovia.builder().nome(nome).build());
             });
 
-            // 2. Tratamento de KMs com cache local por praca
-            Set<String> kmsExistentes = kmCachePorPraca.computeIfAbsent(praca.getId(), id -> {
+            // 2. Tratamento de KMs com cache local por rodovia
+            Set<String> kmsExistentes = kmCachePorRodovia.computeIfAbsent(rodovia.getId(), id -> {
                 // Se não está no cache, busca do banco ou inicializa
-                return kmRepository.findByPracaId(id).stream()
-                        .map(KmPraca::getValor)
+                return kmRepository.findByRodoviaId(id).stream()
+                        .map(KmRodovia::getValor)
                         .collect(Collectors.toCollection(HashSet::new));
             });
 
@@ -128,9 +128,9 @@ public class GestaoRodoviaService {
                 // ✅ Sincronização fina no set de KMs para evitar duplicatas em novosKmsParaSalvar
                 synchronized (kmsExistentes) {
                     if (kmsExistentes.add(valorKm)) {
-                        novosKmsParaSalvar.add(KmPraca.builder()
+                        novosKmsParaSalvar.add(KmRodovia.builder()
                                 .valor(valorKm)
-                                .praca(praca)
+                                .rodovia(rodovia)
                                 .build());
                     }
                 }

@@ -4,15 +4,15 @@ import jakarta.persistence.*;
 import lombok.*;
 
 @Entity
-@Table(name = "pracas", indexes = {
-        @Index(name = "idx_praca_nome", columnList = "nome", unique = true)
+@Table(name = "rodovias", indexes = {
+        @Index(name = "idx_rodovia_nome", columnList = "nome", unique = true)
 })
 @Getter
 @Setter
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class Praca {
+public class Rodovia {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;

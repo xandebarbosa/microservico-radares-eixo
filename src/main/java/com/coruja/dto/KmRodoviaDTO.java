@@ -11,8 +11,8 @@ import java.io.Serializable;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class KmPracaDTO implements Serializable {
+public class KmRodoviaDTO implements Serializable {
     private Long id;
     private String valor;
-    private Long pracaId; // Trazendo apenas o ID, evitando o loop/erro do Hibertate
+    private Long rodoviaId; // Trazendo apenas o ID, evitando o loop/erro do Hibertate
 }

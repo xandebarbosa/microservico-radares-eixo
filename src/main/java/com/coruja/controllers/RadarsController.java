@@ -1,8 +1,8 @@
 package com.coruja.controllers;
 
 import com.coruja.dto.*;
-import com.coruja.entities.KmPraca;
-import com.coruja.entities.Praca;
+import com.coruja.entities.KmRodovia;
+import com.coruja.entities.Rodovia;
 import com.coruja.services.GestaoRodoviaService;
 import com.coruja.services.RadarsService;
 import lombok.RequiredArgsConstructor;
@@ -35,7 +35,7 @@ public class RadarsController {
      * Endpoint específico e otimizado para histórico completo de uma placa.
      */
     @GetMapping("/busca-placa")
-    public ResponseEntity<Page<RadarDTO>> buscarPorPlaca(
+    public ResponseEntity<Page<RadarsDTO>> buscarPorPlaca(
             @RequestParam String placa,
             @PageableDefault(page = 0, size = 20, sort = "data", direction = Sort.Direction.DESC) Pageable pageable
     ) {
@@ -79,7 +79,7 @@ public class RadarsController {
      * Exemplo de chamada:
      * GET /radares/geo-search?lat=-22.89&lon=-48.45&data=2025-12-15&horaInicial=08:00&horaFinal=10:00&raio=500
      */
-    public ResponseEntity<Page<RadarDTO>> buscarPorLocalizacao(
+    public ResponseEntity<Page<RadarsDTO>> buscarPorLocalizacao(
             @RequestParam("latitude") Double latitude,
             @RequestParam("longitude") Double longitude,
             @RequestParam(value = "raio", required = false, defaultValue = "15000") Double raio,
@@ -95,7 +95,7 @@ public class RadarsController {
             @PageableDefault(page = 0, size = 20) Pageable pageable
     ) {
         log.info("🌍 [Cart] Busca geoespacial | Lat: {} | Long: {} | Raio: {}m", latitude, longitude, raio);
-        Page<RadarDTO> resultado = radarsService.buscarPorGeolocalizacao(
+        Page<RadarsDTO> resultado = radarsService.buscarPorGeolocalizacao(
                 latitude, longitude, raio, data, horaInicio, horaFim, pageable
         );
         return ResponseEntity.ok(resultado);
@@ -105,37 +105,37 @@ public class RadarsController {
     // 2. GESTÃO DE DOMÍNIOS (RODOVIAS E KMs)
     // ==================================================================================
     @GetMapping("/rodovias")
-    public ResponseEntity<List<PracaDTO>> listarPracas() {
-        log.info("🛣️ [Eixo] Listando praças");
+    public ResponseEntity<List<RodoviaDTO>> listarPracas() {
+        log.info("🛣️ [Eixo] Listando rodovias");
 
-        List<Praca> pracas = gestaoRodoviaService.listarPracas();
+        List<Rodovia> rodovias = gestaoRodoviaService.listarRodovias();
 
         //Converte entidades para DTOs
-        List<PracaDTO> pracaDTOS = pracas.stream()
-                .map(this::convertToPracasDTO)
+        List<RodoviaDTO> rodoviaDTOS = rodovias.stream()
+                .map(this::convertToRodoviasDTO)
                 .collect(Collectors.toList());
 
-        log.info("✅ [Eixo] Retornando {} rodovias", pracaDTOS.size());
+        log.info("✅ [Eixo] Retornando {} rodovias", rodoviaDTOS.size());
 
-        return ResponseEntity.ok(pracaDTOS);
+        return ResponseEntity.ok(rodoviaDTOS);
     }
 
     /**
      * ✅ Adiciona nova rodovia
      */
     @PostMapping("/rodovias")
-    public ResponseEntity<PracaDTO> adicionarPraca(@RequestBody PracaDTO pracaDTO) {
-        log.info("➕ [Cart] Adicionando rodovia: {}", pracaDTO.getNome());
+    public ResponseEntity<RodoviaDTO> adicionarRodovia(@RequestBody RodoviaDTO rodoviaDTO) {
+        log.info("➕ [Cart] Adicionando rodovia: {}", rodoviaDTO.getNome());
 
         // Converte DTO para entidade
-        Praca praca = new Praca();
-        praca.setNome(pracaDTO.getNome());
+        Rodovia rodovia = new Rodovia();
+        rodovia.setNome(rodoviaDTO.getNome());
 
         // Salva
-        Praca savedPraca = gestaoRodoviaService.salvarPraca(praca);
+        Rodovia savedRodovia = gestaoRodoviaService.salvarRodovia(rodovia);
 
         // Retorna DTO
-        return ResponseEntity.ok(convertToPracasDTO(savedPraca));
+        return ResponseEntity.ok(convertToRodoviasDTO(savedRodovia));
 
     }
 
@@ -143,9 +143,9 @@ public class RadarsController {
      * ✅ Remove rodovia
      */
     @DeleteMapping("/rodovias/{id}")
-    public ResponseEntity<Void> removerPraca(@PathVariable Long id) {
+    public ResponseEntity<Void> removerRodovia(@PathVariable Long id) {
         log.info("🗑️ [Eixo] Removendo rodovia ID: {}", id);
-        gestaoRodoviaService.deletarPraca(id);
+        gestaoRodoviaService.deletarRodovia(id);
         return ResponseEntity.noContent().build();
     }
 
@@ -153,11 +153,11 @@ public class RadarsController {
      * ✅ Lista KMs de uma rodovia específica
      * Já retorna DTO (método do service já faz isso)
      */
-    @GetMapping("/rodovias/{pracaId}/kms")
-    public ResponseEntity<List<KmPracaDTO>> listarKmsDaPraca(@PathVariable Long pracaId) {
-        log.info("📍 [Eixo] Listando KMs da rodovia ID: {}", pracaId);
+    @GetMapping("/rodovias/{rodoviaId}/kms")
+    public ResponseEntity<List<KmRodoviaDTO>> listarKmsDaRodovia(@PathVariable Long rodoviaId) {
+        log.info("📍 [Eixo] Listando KMs da rodovia ID: {}", rodoviaId);
 
-        List<KmPracaDTO> kms = gestaoRodoviaService.listarKmsPorPraca(pracaId);
+        List<KmRodoviaDTO> kms = gestaoRodoviaService.listarKmsPorRodovia(rodoviaId);
         log.info("✅ [Eixo] Retornando {} KMs", kms.size());
         return ResponseEntity.ok(kms);
     }
@@ -166,20 +166,20 @@ public class RadarsController {
      * ✅ Adiciona novo KM
      */
     @PostMapping("/kms")
-    public ResponseEntity<KmPracaDTO> adicionarKm(@RequestBody KmPracaDTO kmPracaDTO) {
-        log.info("➕ [Cart] Adicionando KM: {} para rodovia ID: {}", kmPracaDTO.getValor(), kmPracaDTO.getPracaId());
+    public ResponseEntity<KmRodoviaDTO> adicionarKm(@RequestBody KmRodoviaDTO kmRodoviaDTO) {
+        log.info("➕ [Cart] Adicionando KM: {} para rodovia ID: {}", kmRodoviaDTO.getValor(), kmRodoviaDTO.getRodoviaId());
 
         // Cria entidade a partir do DTO
-        KmPraca km = new KmPraca();
-        km.setValor(kmPracaDTO.getValor());
+        KmRodovia km = new KmRodovia();
+        km.setValor(kmRodoviaDTO.getValor());
 
-        // Precisa buscar a praca pelo ID
-        Praca praca = new Praca();
-        praca.setId(kmPracaDTO.getPracaId());
-        km.setPraca(praca);
+        // Precisa buscar a rodovia pelo ID
+        Rodovia rodovia = new Rodovia();
+        rodovia.setId(kmRodoviaDTO.getRodoviaId());
+        km.setRodovia(rodovia);
 
         // Salva
-        KmPraca savedKm = gestaoRodoviaService.salvarKm(km);
+        KmRodovia savedKm = gestaoRodoviaService.salvarKm(km);
 
         // Retorna DTO
         return ResponseEntity.ok(convertToKmDTO(savedKm));
@@ -210,21 +210,21 @@ public class RadarsController {
     /**
      * Converte entidade Rodovia para DTO
      */
-    private PracaDTO convertToPracasDTO(Praca rodovia) {
-        return PracaDTO.builder()
+    private RodoviaDTO convertToRodoviasDTO(Rodovia rodovia) {
+        return RodoviaDTO.builder()
                 .id(rodovia.getId())
                 .nome(rodovia.getNome())
                 .build();
     }
 
     /**
-     * Converte entidade KmPraca para DTO
+     * Converte entidade KmRodovia para DTO
      */
-    private KmPracaDTO convertToKmDTO(KmPraca km) {
-        return KmPracaDTO.builder()
+    private KmRodoviaDTO convertToKmDTO(KmRodovia km) {
+        return KmRodoviaDTO.builder()
                 .id(km.getId())
                 .valor(km.getValor())
-                .pracaId(km.getPraca().getId())
+                .rodoviaId(km.getRodovia().getId())
                 .build();
     }
 

@@ -44,7 +44,7 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
     SELECT DISTINCT ON (r.data, r.hora, r.placa) r.* FROM radars_eixo r
     WHERE 1=1
     AND (CAST(:placa AS TEXT) IS NULL OR r.placa ILIKE CONCAT('%', CAST(:placa AS TEXT), '%'))
-    AND (CAST(:praca AS TEXT) IS NULL OR r.praca ILIKE CONCAT('%', CAST(:praca AS TEXT), '%'))
+    AND (CAST(:rodovia AS TEXT) IS NULL OR r.rodovia ILIKE CONCAT('%', CAST(:rodovia AS TEXT), '%'))
     AND (CAST(:km AS TEXT) IS NULL OR r.km = CAST(:km AS TEXT))
     AND (CAST(:sentido AS TEXT) IS NULL OR r.sentido ILIKE CAST(:sentido AS TEXT)) -- Alterado para ILIKE
     AND (CAST(:data AS DATE) IS NULL OR r.data = CAST(:data AS DATE))
@@ -60,7 +60,7 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
             @Param("horaInicial") LocalTime horaInicial,
             @Param("horaFinal") LocalTime horaFinal,
             @Param("placa") String placa,
-            @Param("praca") String praca,
+            @Param("rodovia") String rodovia,
             @Param("km") String km,
             @Param("sentido") String sentido,
             Pageable pageable
@@ -122,7 +122,7 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
      */
     @Query(value = """
         WITH dados_recentes AS (
-            SELECT rodovia, praca, km, sentido
+            SELECT rodovia, rodovia, km, sentido
             FROM radars_eixo
             WHERE data >= CURRENT_DATE - INTERVAL '30 days'
         )
@@ -131,10 +131,10 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
     List<String> findDistinctRodoviasOtimizado();
 
     @Query(value = """
-        SELECT DISTINCT praca FROM radars_eixo
+        SELECT DISTINCT rodovia FROM radars_eixo
         WHERE data >= CURRENT_DATE - INTERVAL '30 days'
-        AND praca IS NOT NULL
-        ORDER BY praca
+        AND rodovia IS NOT NULL
+        ORDER BY rodovia
         """, nativeQuery = true)
     List<String> findDistinctPracasOtimizado();
 

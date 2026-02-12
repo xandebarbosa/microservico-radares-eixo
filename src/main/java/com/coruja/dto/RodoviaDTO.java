@@ -12,7 +12,7 @@ import java.io.Serializable;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class PracaDTO implements Serializable {
+public class RodoviaDTO implements Serializable {
     @Serial
     private static final long serialVersionUID = 1L;
 

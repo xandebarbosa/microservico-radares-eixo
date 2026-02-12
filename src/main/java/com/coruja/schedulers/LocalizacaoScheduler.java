@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 @Component
 @Slf4j
 public class LocalizacaoScheduler {
+
     private static final Logger logger = LoggerFactory.getLogger(LocalizacaoScheduler.class);
     private static final int BATCH_SIZE = 1000;
 
@@ -37,7 +38,7 @@ public class LocalizacaoScheduler {
 
         String sqlBatch = """
             WITH pending_batch AS (
-                SELECT id, data, praca
+                SELECT id, data, rodovia
                 FROM radars_eixo
                 WHERE localizacao_id IS NULL
                 LIMIT ?
@@ -50,8 +51,8 @@ public class LocalizacaoScheduler {
                 FROM pending_batch pb
                 JOIN localizacao_radar lr
                     -- Compara as praças ignorando acentos e espaços extras
-                    ON unaccent(TRIM(UPPER(pb.praca))) = unaccent(TRIM(UPPER(lr.praca)))
-                    OR unaccent(TRIM(UPPER(pb.praca))) ILIKE CONCAT('%', unaccent(TRIM(UPPER(lr.praca))), '%')
+                    ON unaccent(TRIM(UPPER(pb.rodovia))) = unaccent(TRIM(UPPER(lr.rodovia)))
+                    OR unaccent(TRIM(UPPER(pb.rodovia))) ILIKE CONCAT('%', unaccent(TRIM(UPPER(lr.rodovia))), '%')
             )
             UPDATE radars_eixo rc
             SET localizacao_id = mu.loc_id

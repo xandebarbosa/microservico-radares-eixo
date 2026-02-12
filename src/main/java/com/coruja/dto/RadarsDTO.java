@@ -13,7 +13,7 @@ import java.time.LocalTime;
 @AllArgsConstructor
 @Builder
 @JsonIgnoreProperties(ignoreUnknown = true)
-public class RadarDTO {
+public class RadarsDTO {
     private Long id;
     private LocalDate data;
     private LocalTime hora;
