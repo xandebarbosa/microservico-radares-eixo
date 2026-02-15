@@ -18,7 +18,6 @@ public class RadarsDTO {
     private LocalDate data;
     private LocalTime hora;
     private String placa;
-    private String praca;
     private String rodovia;
     private String km;
     private Sentido sentido;

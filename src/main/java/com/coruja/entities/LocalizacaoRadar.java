@@ -19,7 +19,6 @@ public class LocalizacaoRadar {
     private String concessionaria;
     private String rodovia;
     private String km;
-    private String praca;
 
     //Campo com as coordenadas geográficas
     //O código 4326 é o padrão universal para coordenadas de GPS (WGS 84)

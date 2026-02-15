@@ -5,7 +5,6 @@ public interface LocalizacaoRadarProjection {
     String getConcessionaria();
     String getRodovia();
     String getKm();
-    String getPraca();
     Double getLatitude();
     Double getLongitude();
 }

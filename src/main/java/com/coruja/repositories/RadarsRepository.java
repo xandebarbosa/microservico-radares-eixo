@@ -35,18 +35,22 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
     @QueryHints(@QueryHint(name = "org.hibernate.readOnly", value = "true"))
     Page<Radars> findAllByPlaca(@Param("placa") String placa, Pageable pageable);
 
-    // 2. BUSCA POR LOCAL (Filtros Específicos: Data, Hora, Rodovia, Km, Sentido)
-    // Otimização: Query Nativa para evitar overhead do Hibernate em projeções complexas
     /**
-     * ✅ BUSCA COM FILTROS COMBINADOS
+     * ✅ BUSCA COM FILTROS COMBINADOS - CORRIGIDA
+     * Melhorias:
+     * 1. Normalização com TRIM, UPPER e unaccent para rodovia e sentido
+     * 2. TRIM no km para evitar problemas com espaços
+     * 3. Uso de ILIKE com pattern matching para rodovia (mais flexível)
+     * 4. Comparação exata (=) para sentido após normalização
      */
     @Query(value = """
     SELECT DISTINCT ON (r.data, r.hora, r.placa) r.* FROM radars_eixo r
     WHERE 1=1
-    AND (CAST(:placa AS TEXT) IS NULL OR r.placa ILIKE CONCAT('%', CAST(:placa AS TEXT), '%'))
-    AND (CAST(:rodovia AS TEXT) IS NULL OR r.rodovia ILIKE CONCAT('%', CAST(:rodovia AS TEXT), '%'))
-    AND (CAST(:km AS TEXT) IS NULL OR r.km = CAST(:km AS TEXT))
-    AND (CAST(:sentido AS TEXT) IS NULL OR r.sentido ILIKE CAST(:sentido AS TEXT)) -- Alterado para ILIKE
+    AND (CAST(:rodovia AS TEXT) IS NULL
+         OR TRIM(UPPER(unaccent(r.rodovia))) ILIKE CONCAT('%', TRIM(UPPER(unaccent(CAST(:rodovia AS TEXT)))), '%'))
+    AND (CAST(:km AS TEXT) IS NULL OR TRIM(r.km) = TRIM(CAST(:km AS TEXT)))
+    AND (CAST(:sentido AS TEXT) IS NULL
+         OR TRIM(UPPER(unaccent(r.sentido))) = TRIM(UPPER(unaccent(CAST(:sentido AS TEXT)))))
     AND (CAST(:data AS DATE) IS NULL OR r.data = CAST(:data AS DATE))
     AND (CAST(:horaInicial AS TIME) IS NULL OR r.hora >= CAST(:horaInicial AS TIME))
     AND (CAST(:horaFinal AS TIME) IS NULL OR r.hora <= CAST(:horaFinal AS TIME))
@@ -59,7 +63,6 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
             @Param("data") LocalDate data,
             @Param("horaInicial") LocalTime horaInicial,
             @Param("horaFinal") LocalTime horaFinal,
-            @Param("placa") String placa,
             @Param("rodovia") String rodovia,
             @Param("km") String km,
             @Param("sentido") String sentido,
@@ -136,7 +139,7 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
         AND rodovia IS NOT NULL
         ORDER BY rodovia
         """, nativeQuery = true)
-    List<String> findDistinctPracasOtimizado();
+    List<String> findDistinctRodoviaOtimizado();
 
     @Query(value = """
         SELECT DISTINCT km FROM radars_eixo

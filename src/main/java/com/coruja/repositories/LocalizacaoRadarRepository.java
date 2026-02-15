@@ -29,7 +29,6 @@ public interface LocalizacaoRadarRepository extends JpaRepository<LocalizacaoRad
             concessionaria,
             rodovia,
             km,
-            praca,
             ST_Y(localizacao::geometry) as latitude,
             ST_X(localizacao::geometry) as longitude
             FROM localizacao_radar

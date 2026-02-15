@@ -170,7 +170,6 @@ public class SftpService {
             String rodovia = dados[2].trim().replaceAll("\\s+", " ");
             String sentido = dados[3].trim().replaceAll("\\s+", " ");
 
-            String praca = "";
             String km = ""; // Campo vazio conforme seu log de exemplo
 
             String[] dataHoraSplit = dataHoraStr.split("T");
@@ -178,14 +177,14 @@ public class SftpService {
             LocalTime hora = LocalTime.parse(dataHoraSplit[1]);
 
             // BUSCA NO CACHE (Sem bater no banco de dados)
-            LocalizacaoRadar localizacaoDoRadar = localizacaoCache.get(gerarChaveCache(praca, km));
+            LocalizacaoRadar localizacaoDoRadar = localizacaoCache.get(gerarChaveCache(rodovia, km));
 
             if (localizacaoDoRadar == null) {
-                log.debug("Localização não encontrada no cache para: {}", praca);
+                log.debug("Localização não encontrada no cache para: {}", rodovia);
             }
 
 
-            return new Radars(data, hora, placa, rodovia, praca, km, sentido, localizacaoDoRadar);
+            return new Radars(data, hora, placa, rodovia, km, sentido, localizacaoDoRadar);
         } catch (Exception e) {
             log.error("Erro no parsing da linha: {}. Causa: {}", linha, e.getMessage());
             return null;

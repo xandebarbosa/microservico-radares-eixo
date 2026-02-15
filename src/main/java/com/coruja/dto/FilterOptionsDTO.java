@@ -22,6 +22,4 @@ public class FilterOptionsDTO implements Serializable {
     private List<String> rodovias;
     private List<String> kms;
     private List<String> sentidos;
-    @JsonAlias("praca")
-    private List<String> pracas;
 }

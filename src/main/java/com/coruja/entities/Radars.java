@@ -30,7 +30,7 @@ public class Radars {
     @Column(nullable = false, length = 7) // Exemplo: ABC1234 (7 caracteres)
     private String placa;
 
-    private String praca;
+    @Column(name = "rodovia")
     private String rodovia;
     private String km;
     private String sentido;
@@ -44,11 +44,10 @@ public class Radars {
     public Radars() {
     }
 
-    public Radars(LocalDate data, LocalTime hora, String placa, String praca, String rodovia, String km, String sentido, LocalizacaoRadar localizacao) {
+    public Radars(LocalDate data, LocalTime hora, String placa, String rodovia, String km, String sentido, LocalizacaoRadar localizacao) {
         this.data = data;
         this.hora = hora;
         this.placa = placa;
-        this.praca = praca;
         this.rodovia = rodovia;
         this.km = km != null ? km : "";
         this.sentido = sentido;

@@ -19,6 +19,8 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -83,7 +85,7 @@ public class RadarsService {
      * @param data        Data do registro
      * @param horaInicial Hora inicial do intervalo
      * @param horaFinal   Hora final do intervalo
-     * @param rodovia       Praca da rodovia
+     * @param rodovia     Local da rodovia
      * @param km          Quilômetro da rodovia
      * @param sentido     Sentido da via
      * @param pageable    Informações de paginação
@@ -99,18 +101,38 @@ public class RadarsService {
             String sentido,
             Pageable pageable
     ) {
-        log.info("🔎 Executando query no Banco: Data={}, Rodovia={}, km={}, Sentido={}", data, rodovia, km, sentido);
+        log.info("=== INÍCIO BUSCA POR LOCAL - EIXO ===");
+        log.info("📅 Data: {}", data);
+        log.info("🕐 Hora Inicial: {}", horaInicial);
+        log.info("🕑 Hora Final: {}", horaFinal);
+        log.info("🛣️  Rodovia (ANTES normalização): '{}'", rodovia);
+        log.info("📍 KM (ANTES normalização): '{}'", km);
+        log.info("➡️  Sentido (ANTES normalização): '{}'", sentido);
+
+        // Normalização com logs
+        String rodoviaProcessada = normalize(rodovia);
+        String kmProcessado = normalize(km);
+        String sentidoProcessado = normalize(sentido);
+
+        log.info("🛣️  Rodovia (DEPOIS normalização): '{}'", rodoviaProcessada);
+        log.info("📍 KM (DEPOIS normalização): '{}'", kmProcessado);
+        log.info("➡️  Sentido (DEPOIS normalização): '{}'", sentidoProcessado);
+
+        log.info("🔎 Executando query no Banco de Dados...");
 
         Page<Radars> page = radarsRepository.findByLocalFilter(
                 data,
                 horaInicial,
                 horaFinal,
-                null,
                 normalize(rodovia),
                 normalize(km),
                 sentido,
                 pageable
         );
+        log.info("✅ Query executada. Resultados encontrados: {}", page.getTotalElements());
+        log.info("📄 Itens na página atual: {}", page.getNumberOfElements());
+        log.info("=== FIM BUSCA POR LOCAL - EIXO ===");
+
         return convertToPageDTO(page);
     }
 
@@ -223,14 +245,36 @@ public class RadarsService {
         String concessionaria = routingKey.split("\\.")[1].toUpperCase();
         return String.format("%s|%s|%s|%s|%s|%s|%s|%s",
                 concessionaria, radar.getData(), radar.getHora(), radar.getPlaca(),
-                radar.getPraca(), radar.getRodovia(), radar.getKm(), radar.getSentido());
+                radar.getRodovia(), radar.getRodovia(), radar.getKm(), radar.getSentido());
     }
 
-
-
+    /**
+     * ✅ NORMALIZAÇÃO CORRIGIDA COM URL DECODING
+     * Remove espaços extras, converte para maiúsculas, decodifica URL
+     * Retorna null se input for null ou vazio
+     */
     private String normalize(String input) {
-        if (input == null) return null;
-        return normalizeCache.computeIfAbsent(input, i -> i.trim().toUpperCase());
+        if (input == null || input.isBlank()) {
+            return null;
+        }
+
+        return normalizeCache.computeIfAbsent(input, i -> {
+            try {
+                // ✅ 1. DECODIFICA URL primeiro (P5%20-%20Jau → P5 - Jau)
+                String decoded = URLDecoder.decode(i, StandardCharsets.UTF_8);
+
+                // ✅ 2. NORMALIZA (trim + uppercase)
+                String normalized = decoded.trim().toUpperCase();
+
+                log.debug("Normalizado: '{}' -> '{}' -> '{}'", i, decoded, normalized);
+                return normalized;
+            } catch (Exception e) {
+                // Fallback se houver erro na decodificação
+                String normalized = i.trim().toUpperCase();
+                log.warn("Erro ao decodificar '{}', usando sem decode: '{}'", i, normalized);
+                return normalized;
+            }
+        });
     }
 
     /**
@@ -257,7 +301,6 @@ public class RadarsService {
         dto.setData(radars.getData());
         dto.setHora(radars.getHora());
         dto.setPlaca(radars.getPlaca());
-        dto.setPraca(radars.getPraca());
         dto.setRodovia(radars.getRodovia());
         dto.setKm(radars.getKm());
 
@@ -277,7 +320,6 @@ public class RadarsService {
                 .data(radars.getData())
                 .hora(radars.getHora())
                 .placa(radars.getPlaca())
-                .praca(radars.getPraca())
                 .rodovia(radars.getRodovia())
                 .km(radars.getKm())
                 .sentido(Sentido.fromString(radars.getSentido()))
