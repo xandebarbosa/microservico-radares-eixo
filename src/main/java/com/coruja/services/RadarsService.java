@@ -203,7 +203,7 @@ public class RadarsService {
      * Roda às 3:00 AM todos os dias
      */
     @Scheduled(cron = "0 0 3 * * *")
-    @CacheEvict(value = {"radars-search", "radars-placa", "opcoes-filtro-eixo", "lista-rodovias", "lista-kms"}, allEntries = true)
+    @CacheEvict(value = {"radars-search", "radars-placa", "opcoes-filtro-eixo", "lista-rodovias"}, allEntries = true)
     public void limparCacheDiario() {
         log.info("🧹 Limpeza diária de cache executada");
     }

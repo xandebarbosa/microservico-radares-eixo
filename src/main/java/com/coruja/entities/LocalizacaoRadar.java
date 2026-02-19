@@ -18,6 +18,7 @@ public class LocalizacaoRadar {
     private  Long id;
     private String concessionaria;
     private String rodovia;
+    private String praca;
     private String km;
 
     //Campo com as coordenadas geográficas

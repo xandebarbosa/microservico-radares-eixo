@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.text.Normalizer;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -41,15 +42,16 @@ public class SftpService {
     private String sftpPass;
     @Value("${sftp.remote.directory}")
     private String remoteDirectory;
-    @Value("${sftp.remote.radar.directory:/radar}") // Default para /radar se não houver no properties
+    @Value("${sftp.remote.radar.directory:/radar}")
     private String remoteRadarDirectory;
     @Value("${sftp.local.directory}")
     private String localDirectory;
-    @Value("${sftp.timeout:30000}") // 30 segundos de timeout
+    @Value("${sftp.timeout:30000}")
     private int sftpTimeout;
 
-    // Cache temporário para evitar milhares de consultas ao banco por arquivo
+    // Cache local para performance
     private Map<String, LocalizacaoRadar> localizacaoCache = new HashMap<>();
+    private Map<String, LocalizacaoRadar> pracaCache = new HashMap<>();
 
     private final RadarsService radarsService;
     private final LocalizacaoRadarRepository localizacaoRadarRepository;
@@ -69,101 +71,73 @@ public class SftpService {
     @Scheduled(fixedRateString = "${sftp.schedule.rate.ms}")
     public void processarSftpEixo() {
         LocalDateTime lastExecutionTime = LocalDateTime.now();
-        log.info("Iniciando verificação de arquivos no SFTP (Eixo) às {}...", lastExecutionTime);
+        log.info("Iniciando verificação SFTP (Eixo) às {}...", lastExecutionTime);
 
         Session session = null;
         ChannelSftp sftpChannel = null;
 
         try {
-            // 1. CARREGAR CACHE: Busca todas as localizações antes de processar as linhas
-            // Isso evita o erro de "Connection Reset" por excesso de queries pequenas.
-            carregarCacheLocalizacoes();
+            // 1. Pré-carrega caches para evitar N+1 selects
+            carregarCaches();
 
-            // 2. Tentar conexão com lógica de retry manual simples ou tratamento de erro
             session = conectarSessaoSftp();
-            if (session == null || !session.isConnected()) {
-                log.error("❌ Falha crítica: Não foi possível estabelecer conexão com o servidor SFTP.");
-                return;
-            }
+            if (session == null || !session.isConnected()) return;
 
             sftpChannel = abrirCanalSftp(session);
-            sftpChannel.cd(remoteDirectory);
 
-            // 3. Cria diretório local
             Path localPath = Path.of(localDirectory);
             Files.createDirectories(localPath);
             Set<String> arquivosLocais = listarArquivosLocais(localPath);
 
-            List<Radars> todosOsRadares = new ArrayList<>();
+            // Processa apenas arquivos de hoje e ontem
             LocalDate dataLimite = LocalDate.now().minusDays(1);
 
-            // --- FLUXO 1: Pasta Padrão (Recebidos) ---
-            log.info("Processando diretório raiz: {}", remoteDirectory);
-            processarPasta(sftpChannel, remoteDirectory, localPath, arquivosLocais, dataLimite, todosOsRadares);
+            // --- FLUXO 1: Pasta Praças ---
+            log.info("📂 Varrendo Praças: {}", remoteDirectory);
+            processarPasta(sftpChannel, remoteDirectory, localPath, arquivosLocais, dataLimite);
 
-            // --- FLUXO 2: Pasta Radar (Recursivo para subpastas) ---
-            log.info("Processando diretório de radares: {}", remoteRadarDirectory);
-            processarPastaRecursiva(sftpChannel, remoteRadarDirectory, localPath, arquivosLocais, dataLimite, todosOsRadares);
+            // --- FLUXO 2: Pasta Radares ---
+            log.info("📂 Varrendo Radares: {}", remoteRadarDirectory);
+            processarPastaRecursiva(sftpChannel, remoteRadarDirectory, localPath, arquivosLocais, dataLimite);
 
-            // Salvamento único para performance
-            if (!todosOsRadares.isEmpty()) {
-                radarsService.saveRadars(todosOsRadares);
-                log.info("Sucesso total: {} registros processados de todas as origens.", todosOsRadares.size());
-            }
-
-        } catch (JSchException e) {
-            log.error("🌐 Erro de conexão SFTP (Internet/Servidor fora): {}", e.getMessage());
-        } catch (SftpException e) {
-            log.error("📁 Erro de permissão ou diretório no SFTP: {}", e.getMessage());
         } catch (Exception e) {
-            log.error("⚠️ Erro inesperado no processamento SFTP: ", e);
+            log.error("⚠️ Erro no ciclo SFTP: ", e);
         } finally {
             desconectarSftp(sftpChannel, session);
-            localizacaoCache.clear(); // Limpa o cache para liberar memória
-            log.info("*** Processamento finalizado ***");
+            localizacaoCache.clear();
+            pracaCache.clear();
+            log.info("*** Ciclo finalizado ***");
         }
     }
 
-    /**
-     * Processa uma pasta específica (sem entrar em subpastas)
-     */
-    private void processarPasta(ChannelSftp sftp, String path, Path localPath, Set<String> locais, LocalDate limite, List<Radars> listaGeral) throws SftpException {
+    // --- LÓGICA CORE: BAIXAR -> PROCESSAR -> SALVAR (SEM ACUMULAR) ---
+
+    private void processarPasta(ChannelSftp sftp, String path, Path localPath, Set<String> locais, LocalDate limite) throws SftpException {
         sftp.cd(path);
         Vector<ChannelSftp.LsEntry> entries = sftp.ls(".");
-
         for (ChannelSftp.LsEntry entry : entries) {
             String nome = entry.getFilename();
             if (!entry.getAttrs().isDir() && !nome.startsWith(".") && !locais.contains(nome)) {
                 if (isDentroDoPeriodo(nome, limite)) {
-                    baixarEProcessar(sftp, nome, localPath, listaGeral);
+                    baixarEProcessar(sftp, nome, localPath);
                 }
             }
         }
     }
 
-    /**
-     * Navega recursivamente em qualquer profundidade (ex: /radar/FSCII6521/20250728/)
-     */
-    private void processarPastaRecursiva(ChannelSftp sftp, String path, Path localPath, Set<String> locais, LocalDate limite, List<Radars> listaGeral) {
+    private void processarPastaRecursiva(ChannelSftp sftp, String path, Path localPath, Set<String> locais, LocalDate limite) {
         try {
-            log.debug("Explorando: {}", path);
             sftp.cd(path);
             Vector<ChannelSftp.LsEntry> entries = sftp.ls(".");
-
             for (ChannelSftp.LsEntry entry : entries) {
                 String nome = entry.getFilename();
                 if (nome.equals(".") || nome.equals("..") || nome.startsWith(".")) continue;
 
                 if (entry.getAttrs().isDir()) {
-                    // Se for pasta, entra recursivamente usando o caminho completo
-                    processarPastaRecursiva(sftp, path + "/" + nome, localPath, locais, limite, listaGeral);
-                    sftp.cd(path); // Volta para o nível atual
-                } else {
-                    // Se for arquivo, valida data e se já existe localmente
-                    if (!locais.contains(nome) && isDentroDoPeriodo(nome, limite)) {
-                        log.info("✨ Novo arquivo detectado em subpasta: {}", nome);
-                        baixarEProcessar(sftp, nome, localPath, listaGeral);
-                    }
+                    processarPastaRecursiva(sftp, path + "/" + nome, localPath, locais, limite);
+                    sftp.cd(path);
+                } else if (!locais.contains(nome) && isDentroDoPeriodo(nome, limite)) {
+                    baixarEProcessar(sftp, nome, localPath);
                 }
             }
         } catch (SftpException e) {
@@ -171,246 +145,163 @@ public class SftpService {
         }
     }
 
-    private void baixarEProcessar(ChannelSftp sftp, String nome, Path localPath, List<Radars> listaGeral) {
-        baixarArquivo(sftp, nome, localPath).ifPresent(arquivo -> {
-            List<Radars> processados = processarArquivoLocal(arquivo);
-            listaGeral.addAll(processados);
-        });
+    private void baixarEProcessar(ChannelSftp sftp, String nome, Path localPath) {
+        baixarArquivo(sftp, nome, localPath).ifPresent(this::processarArquivoLocal);
     }
 
-    private void carregarCacheLocalizacoes() {
-        log.info("🧠 Carregando localizações para cache em memória...");
+    private void processarArquivoLocal(Path arquivoLocal) {
+        log.info("📄 Processando arquivo: {}", arquivoLocal.getFileName());
+
+        Set<String> rodoviasDescobertas = new HashSet<>();
+        List<Radars> loteParaSalvar = new ArrayList<>();
+
+        try (Stream<String> lines = Files.lines(arquivoLocal, StandardCharsets.UTF_8)) {
+
+            // Processamento Streamado: Lê, Converte e Adiciona na Lista
+            lines.forEach(linha -> {
+                Radars r = parseLine(linha);
+                if (r != null) {
+                    loteParaSalvar.add(r);
+                    rodoviasDescobertas.add(r.getRodovia());
+                }
+            });
+
+            // 1. Atualiza Domínio (Rodovias) - Apenas se houver novidades
+            if (!rodoviasDescobertas.isEmpty()) {
+                gestaoRodoviaService.registrarDescobertas(new ArrayList<>(rodoviasDescobertas));
+            }
+
+            // 2. Salva Lote Único do Arquivo (Batch)
+            if (!loteParaSalvar.isEmpty()) {
+                long inicio = System.currentTimeMillis();
+                radarsService.saveRadars(loteParaSalvar);
+                long fim = System.currentTimeMillis();
+                log.info("💾 Salvos {} registros em {}ms.", loteParaSalvar.size(), (fim - inicio));
+            }
+
+        } catch (IOException e) {
+            log.error("❌ Erro ao ler arquivo: {}", arquivoLocal, e);
+        }
+    }
+
+    // --- CACHE E PARSE (Lógica mantida e otimizada) ---
+
+    private void carregarCaches() {
+        log.info("🧠 Carregando caches...");
         try {
             List<LocalizacaoRadar> lista = localizacaoRadarRepository.findAll();
+            // Cache de Trecho
             this.localizacaoCache = lista.stream()
                     .collect(Collectors.toMap(
                             l -> gerarChaveCache(l.getRodovia(), l.getKm()),
                             l -> l,
-                            (existente, novo) -> existente // Em caso de duplicata no banco, mantém o primeiro
+                            (a, b) -> a
                     ));
-            log.info("🧠 Cache carregado com {} localizações.", localizacaoCache.size());
-        } catch (Exception e) {
-            log.error("Falha ao carregar cache de localizações: ", e);
-        }
+            // Cache de Praça
+            this.pracaCache = lista.stream()
+                    .filter(l -> l.getPraca() != null)
+                    .collect(Collectors.toMap(
+                            l -> normalizarTexto(l.getPraca()),
+                            l -> l,
+                            (a, b) -> a
+                    ));
+            log.info("🧠 Caches prontos: {} trechos, {} praças.", localizacaoCache.size(), pracaCache.size());
+        } catch (Exception e) { log.error("Erro no cache: ", e); }
     }
 
     private String gerarChaveCache(String rodovia, String km) {
-        if (rodovia == null) rodovia = "";
-        if (km == null) km = "";
-        // Normaliza para evitar erros de espaços ou caixa alta/baixa
-        return (rodovia.trim() + "|" + km.trim()).toUpperCase();
+        return (normalizarTexto(rodovia) + "|" + normalizarTexto(km));
+    }
+
+    private String normalizarTexto(String texto) {
+        if (texto == null) return "";
+        String nfdNormalizedString = Normalizer.normalize(texto, Normalizer.Form.NFD);
+        Pattern pattern = Pattern.compile("\\p{InCombiningDiacriticalMarks}+");
+        return pattern.matcher(nfdNormalizedString).replaceAll("").trim().toUpperCase();
     }
 
     private Radars parseLine(String linha) {
         String[] dados = linha.split(";", -1);
-
         if (dados.length < 4) return null;
-
         try {
             String dataHoraStr = dados[0].trim();
             String placa = tratarPlaca(dados[1].trim());
+            if (placa.length() < 7 && !placa.equals("N/I")) {
+                return null; // Ignora se inválida
+            }
             String localizacaoBruta = dados[2].trim();
             String sentido = dados[3].trim().replaceAll("\\s+", " ");
-
-            // --- TRATAMENTO DE DATA E HORA ---
             String[] dataHoraSplit = dataHoraStr.split("T");
             LocalDate data = LocalDate.parse(dataHoraSplit[0]);
-
-            // Normaliza a hora: substitui '-' por ':' apenas se for o formato novo
-            // Ex: 05-46-28 vira 05:46:28. Se já for 05:46:28, permanece igual.
-            String horaNormalizada = dataHoraSplit[1].replace("-", ":");
-            if (horaNormalizada.contains(".")) {
-                horaNormalizada = horaNormalizada.split("\\.")[0];
-            }
+            String horaNormalizada = dataHoraSplit[1].replace("-", ":").split("\\.")[0];
             LocalTime hora = LocalTime.parse(horaNormalizada);
 
-            // --- TRATAMENTO DE RODOVIA E KM (Lógica Híbrida) ---
-            String rodovia;
-            String km = ""; // Campo vazio conforme seu log de exemplo
+            String rodoviaFinal = "";
+            String kmFinal = "";
+            LocalizacaoRadar localizacaoVinculada = null;
+            String nomeRodoviaUpper = localizacaoBruta.toUpperCase();
 
-            // Verifica se contém indicadores do padrão da pasta /radar
-            String localizacaoUpper = localizacaoBruta.toUpperCase();
-            if (localizacaoUpper.contains("KM:") || localizacaoUpper.contains("METROS:")) {
-
-                // PADRÃO /radar: Mantém a string completa conforme solicitado
-                // Ex: "SPA-159/225 km: 008 Metros: 470" ou "Rodovia: SP-294 km: 543..."
-                rodovia = localizacaoBruta.replaceAll("(?i)Rodovia:\\s*", "").trim();
-                km = "0";
-
-                log.debug("Processando padrão Radar: {}", rodovia);
+            if (nomeRodoviaUpper.contains("KM:") || nomeRodoviaUpper.contains("METROS:")) {
+                rodoviaFinal = extrairRodoviaDoTexto(localizacaoBruta);
+                kmFinal = extrairKmFormatado(localizacaoBruta);
+                localizacaoVinculada = localizacaoCache.get(gerarChaveCache(rodoviaFinal, kmFinal));
             } else {
-                // PADRÃO /recebidos: Mantém o comportamento original (P6 - Piracicaba, etc)
-                rodovia = localizacaoBruta;
-                km = (dados.length > 4) ? dados[4].trim() : "";
+                String chaveBusca = normalizarTexto(localizacaoBruta);
+                localizacaoVinculada = pracaCache.get(chaveBusca);
+                if (localizacaoVinculada != null) {
+                    rodoviaFinal = localizacaoVinculada.getRodovia();
+                    kmFinal = localizacaoVinculada.getKm();
+                } else {
+                    rodoviaFinal = localizacaoBruta;
+                    kmFinal = "";
+                }
             }
-
-            // 3. SEGURANÇA PARA O BANCO (Truncar apenas se exceder um limite razoável, ex: 100)
-            // Isso evita que o erro de VARCHAR interrompa o processamento
-            if (rodovia.length() > 100) {
-                rodovia = rodovia.substring(0, 100);
-            }
-
-            // BUSCA NO CACHE (Sem bater no banco de dados)
-            LocalizacaoRadar localizacaoDoRadar = localizacaoCache.get(gerarChaveCache(rodovia, km));
-
-            if (localizacaoDoRadar == null) {
-                log.debug("Localização não encontrada no cache para: {}", rodovia);
-            }
-
-            return new Radars(data, hora, placa, rodovia, km, sentido, localizacaoDoRadar);
-        } catch (Exception e) {
-            log.error("Erro no parsing da linha: {}. Causa: {}", linha, e.getMessage());
-            return null;
-        }
+            if (rodoviaFinal != null && rodoviaFinal.length() > 100) rodoviaFinal = rodoviaFinal.substring(0, 100);
+            return new Radars(data, hora, placa, rodoviaFinal, kmFinal, sentido, localizacaoVinculada);
+        } catch (Exception e) { return null; }
     }
 
-    private String extrairRodoviaNovoPadrao(String texto) {
-        // Busca por algo como SP-294 ou BR-153
-        Pattern p = Pattern.compile("([A-Z]{2}-\\d{3})", Pattern.CASE_INSENSITIVE);
-        Matcher m = p.matcher(texto);
-        if (m.find()) {
-            return m.group(1).toUpperCase();
-        }
-        return texto.split("km:")[0].replace("Rodovia:", "").trim();
+    // --- MÉTODOS AUXILIARES (Regex e Tratamento) ---
+    private String extrairRodoviaDoTexto(String t) { Pattern p = Pattern.compile("([A-Z]{2,3}-?\\d{3}(?:/\\d{3})?)", Pattern.CASE_INSENSITIVE); Matcher m = p.matcher(t); return m.find() ? m.group(1).toUpperCase() : ""; }
+    private String extrairKmFormatado(String t) {
+        Pattern pk = Pattern.compile("km[:\\s]*(\\d+)", 2); Pattern pm = Pattern.compile("metros[:\\s]*(\\d+)", 2);
+        Matcher mk = pk.matcher(t); Matcher mm = pm.matcher(t);
+        String vk = mk.find() ? String.format("%03d", Integer.parseInt(mk.group(1))) : "000";
+        String vm = mm.find() ? String.format("%03d", Integer.parseInt(mm.group(1))) : "000";
+        return (vk.equals("000") && vm.equals("000")) ? "" : vk + "+" + vm;
     }
 
-    private String extrairKmNovoPadrao(String texto) {
-        // Busca o número logo após "km:"
-        Pattern p = Pattern.compile("km:\\s*(\\d+)", Pattern.CASE_INSENSITIVE);
-        Matcher m = p.matcher(texto);
-        return m.find() ? m.group(1) : "";
-    }
-
-    // --- MANTIDOS MÉTODOS AUXILIARES (tratarPlaca, baixarArquivo, etc) ---
     private String tratarPlaca(String placa) {
         if (placa == null || placa.isBlank()) return "N/I";
-        placa = placa.replaceAll("[^a-zA-Z0-9]", "").toUpperCase();
-        return placa.length() > 7 ? placa.substring(0, 7) : placa;
+
+        // Remove tudo que não for letra ou número e converte para maiúsculo
+        String limpa = placa.replaceAll("[^a-zA-Z0-9]", "").toUpperCase();
+
+        // CORREÇÃO CRÍTICA: Garante que nunca exceda 7 caracteres
+        if (limpa.length() > 7) {
+            log.warn("⚠️ Placa truncada (original '{}'): '{}'", placa, limpa);
+            return limpa.substring(0, 7);
+        }
+
+        return limpa;
     }
 
-    private boolean isDentroDoPeriodo(String nomeArquivo, LocalDate dataLimite) {
-        return extrairDataDoNome(nomeArquivo)
-                .map(dataArquivo -> !dataArquivo.isBefore(dataLimite))
-                .orElse(false);
-    }
-
-    private Optional<LocalDate> extrairDataDoNome(String nomeArquivo) {
+    private boolean isDentroDoPeriodo(String n, LocalDate d) { return extrairDataDoNome(n).map(da -> !da.isBefore(d)).orElse(false); }
+    private Optional<LocalDate> extrairDataDoNome(String n) {
         try {
-            // Tenta padrão com hifen: 2025-07-28
-            Pattern patternHifen = Pattern.compile("(\\d{4}-\\d{2}-\\d{2})");
-            Matcher matcherHifen = patternHifen.matcher(nomeArquivo);
-            if (matcherHifen.find()) {
-                return Optional.of(LocalDate.parse(matcherHifen.group(1)));
-            }
-
-            // Tenta padrão colado: 20260215
-            Pattern patternColado = Pattern.compile("(\\d{8})");
-            Matcher matcherColado = patternColado.matcher(nomeArquivo);
-            if (matcherColado.find()) {
-                return Optional.of(LocalDate.parse(matcherColado.group(1), DateTimeFormatter.ofPattern("yyyyMMdd")));
-            }
-        } catch (DateTimeParseException e) {
-            log.warn("Data inválida no arquivo: {}", nomeArquivo);
-        }
-        return Optional.empty();
+            Matcher m1 = Pattern.compile("(\\d{4}-\\d{2}-\\d{2})").matcher(n); if (m1.find()) return Optional.of(LocalDate.parse(m1.group(1)));
+            Matcher m2 = Pattern.compile("(\\d{8})").matcher(n); if (m2.find()) return Optional.of(LocalDate.parse(m2.group(1), DateTimeFormatter.ofPattern("yyyyMMdd")));
+        } catch (Exception e) {} return Optional.empty();
     }
 
-    private List<Radars> processarArquivoLocal(Path arquivoLocal) {
-
-        log.info("📂 Abrindo arquivo para processamento: {}", arquivoLocal.getFileName());
-        // Mapa para coletar descobertas de domínio (Praca -> Lista de KMs)
-        Map<String, Set<String>> descobertas = new HashMap<>();
-
-        try (Stream<String> lines = Files.lines(arquivoLocal, StandardCharsets.UTF_8)) {
-            // Log das primeiras 3 linhas brutas do arquivo para conferência de formato
-            List<String> amostraBruta = Files.lines(arquivoLocal, StandardCharsets.UTF_8)
-                    .limit(3)
-                    .collect(Collectors.toList());
-            log.info("📝 Amostra do conteúdo bruto (Primeiras 3 linhas):");
-            amostraBruta.forEach(l -> log.info("   > {}", l));
-
-            List<Radars> resultado = lines.map(linha -> {
-                        Radars r = parseLine(linha);
-                        if (r != null) {
-                            // Adiciona ao mapa de descobertas para popular as tabelas de domínio
-                            descobertas.computeIfAbsent(r.getRodovia(), k -> new HashSet<>()).add(r.getKm());
-                        }
-                        return r;
-                    })
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toList());
-
-            // CHAMA O APRENDIZADO DE DOMÍNIO (Popula as tabelas pracas e kms_praca)
-            if (!descobertas.isEmpty()) {
-                gestaoRodoviaService.registrarDescobertas(descobertas);
-            }
-
-            if (!resultado.isEmpty()) {
-                radarsService.saveRadars(resultado);
-            }
-
-            // Log de conferência dos objetos mapeados (Amostra de 2 registros)
-            if (!resultado.isEmpty()) {
-                log.info("✅ Mapeamento bem sucedido. Exemplo de dados processados:");
-                resultado.stream().limit(2).forEach(r ->
-                        log.info("   [OBJETO] Data: {}, Placa: {}, Localidade: {}",
-                                r.getData(), r.getPlaca(), r.getRodovia())
-                );
-            }
-
-            return resultado;
-        } catch (IOException e) {
-            log.error("❌ Erro ao ler arquivo: {}", arquivoLocal, e);
-            return Collections.emptyList();
-        }
+    // --- CONEXÃO SFTP ---
+    private Session conectarSessaoSftp() throws Exception { JSch j = new JSch(); Session s = j.getSession(sftpUser, sftpHost, sftpPort); s.setPassword(sftpPass); s.setConfig("StrictHostKeyChecking", "no"); s.connect(sftpTimeout); return s; }
+    private ChannelSftp abrirCanalSftp(Session s) throws Exception { ChannelSftp c = (ChannelSftp) s.openChannel("sftp"); c.connect(); return c; }
+    private void desconectarSftp(ChannelSftp c, Session s) { if (c != null && c.isConnected()) c.disconnect(); if (s != null && s.isConnected()) s.disconnect(); }
+    private Optional<Path> baixarArquivo(ChannelSftp c, String n, Path d) {
+        Path p = d.resolve(n);
+        try (InputStream i = c.get(n)) { Files.copy(i, p, StandardCopyOption.REPLACE_EXISTING); return Optional.of(p); }
+        catch (Exception e) { log.error("Erro download: {}", n); return Optional.empty(); }
     }
-
-    private Session conectarSessaoSftp() throws Exception {
-        try {
-            JSch jsch = new JSch();
-            Session session = jsch.getSession(sftpUser, sftpHost, sftpPort);
-            session.setPassword(sftpPass);
-            session.setConfig("StrictHostKeyChecking", "no");
-
-            // ADICIONADO: Timeout para não deixar a thread travada eternamente se a internet cair
-            session.connect(sftpTimeout);
-
-            log.info("✅ Sessão SFTP conectada.");
-            return session;
-        } catch (Exception e) {
-            log.error("❌ Erro ao conectar no host {}: {}", sftpHost, e.getMessage());
-            throw e;
-        }
-    }
-
-    private ChannelSftp abrirCanalSftp(Session session) throws Exception {
-        ChannelSftp sftpChannel = (ChannelSftp) session.openChannel("sftp");
-        sftpChannel.connect();
-        return sftpChannel;
-    }
-
-    private void desconectarSftp(ChannelSftp channel, Session session) {
-        if (channel != null && channel.isConnected()) channel.disconnect();
-        if (session != null && session.isConnected()) session.disconnect();
-    }
-
-    private Optional<Path> baixarArquivo(ChannelSftp sftpChannel, String nomeArquivo, Path diretorioLocal) {
-        Path arquivoLocal = diretorioLocal.resolve(nomeArquivo);
-        try (InputStream inputStream = sftpChannel.get(nomeArquivo)) {
-            Files.copy(inputStream, arquivoLocal, StandardCopyOption.REPLACE_EXISTING);
-            return Optional.of(arquivoLocal);
-        } catch (Exception e) {
-            log.error("Erro no download: {}", nomeArquivo);
-            return Optional.empty();
-        }
-    }
-
-    private Set<String> listarArquivosLocais(Path diretorioLocal) {
-        if (!Files.exists(diretorioLocal)) return Collections.emptySet();
-        try (Stream<Path> stream = Files.list(diretorioLocal)) {
-            return stream.filter(Files::isRegularFile).map(path -> path.getFileName().toString()).collect(Collectors.toSet());
-        } catch (IOException e) {
-            return Collections.emptySet();
-        }
-    }
+    private Set<String> listarArquivosLocais(Path d) { if (!Files.exists(d)) return Collections.emptySet(); try (Stream<Path> s = Files.list(d)) { return s.filter(Files::isRegularFile).map(p -> p.getFileName().toString()).collect(Collectors.toSet()); } catch (IOException e) { return Collections.emptySet(); } }
 }
