@@ -152,26 +152,33 @@ public class SftpService {
     private void processarArquivoLocal(Path arquivoLocal) {
         log.info("📄 Processando arquivo: {}", arquivoLocal.getFileName());
 
-        Set<String> rodoviasDescobertas = new HashSet<>();
+        Map<String, Set<String>> dominiosDescobertos = new HashMap<>();
         List<Radars> loteParaSalvar = new ArrayList<>();
 
         try (Stream<String> lines = Files.lines(arquivoLocal, StandardCharsets.UTF_8)) {
-
-            // Processamento Streamado: Lê, Converte e Adiciona na Lista
             lines.forEach(linha -> {
                 Radars r = parseLine(linha);
                 if (r != null) {
                     loteParaSalvar.add(r);
-                    rodoviasDescobertas.add(r.getRodovia());
+
+                    // Lógica para separar Rodovia e KM
+                    if (r.getRodovia() != null && !r.getRodovia().isBlank()) {
+                        dominiosDescobertos.computeIfAbsent(r.getRodovia(), k -> new HashSet<>());
+
+                        // Só adiciona o KM se ele existir no arquivo (ignora os vazios da pasta /recebidos)
+                        if (r.getKm() != null && !r.getKm().isBlank()) {
+                            dominiosDescobertos.get(r.getRodovia()).add(r.getKm());
+                        }
+                    }
                 }
             });
 
-            // 1. Atualiza Domínio (Rodovias) - Apenas se houver novidades
-            if (!rodoviasDescobertas.isEmpty()) {
-                gestaoRodoviaService.registrarDescobertas(new ArrayList<>(rodoviasDescobertas));
+            // 1. Atualiza Domínio (Rodovias e KMs)
+            if (!dominiosDescobertos.isEmpty()) {
+                gestaoRodoviaService.registrarDescobertas(dominiosDescobertos);
             }
 
-            // 2. Salva Lote Único do Arquivo (Batch)
+            // 2. Salva Lote Único do Arquivo
             if (!loteParaSalvar.isEmpty()) {
                 long inicio = System.currentTimeMillis();
                 radarsService.saveRadars(loteParaSalvar);

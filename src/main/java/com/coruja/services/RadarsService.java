@@ -54,6 +54,7 @@ public class RadarsService {
     // ✅ Cache thread-safe para metadados frequentes (ex: nomes de praças)
     private final ConcurrentHashMap<String, String> normalizeCache = new ConcurrentHashMap<>();
 
+
     // Construtor que recebe o repositório como parâmetro e o atribui à variável de instância.
     // Isso permite a injeção de dependência via construtor.
     public RadarsService(

@@ -1,6 +1,7 @@
 package com.coruja.controllers;
 
 import com.coruja.dto.*;
+import com.coruja.entities.KmRodovia;
 import com.coruja.entities.Rodovia;
 import com.coruja.services.GestaoRodoviaService;
 import com.coruja.services.RadarsService;
@@ -148,6 +149,44 @@ public class RadarsController {
         return ResponseEntity.noContent().build();
     }
 
+    /**
+     * ✅ Lista KMs de uma rodovia específica
+     * Já retorna DTO (método do service já faz isso)
+     */
+    @GetMapping("/rodovias/{rodoviaId}/kms")
+    public ResponseEntity<List<KmRodoviaDTO>> listarKmsDaRodovia(@PathVariable Long rodoviaId) {
+        log.info("📍 [Eixo] Listando KMs da rodovia ID: {}", rodoviaId);
+
+        List<KmRodoviaDTO> kms = gestaoRodoviaService.listarKmsPorRodovia(rodoviaId);
+
+        log.info("✅ [Eixo] Retornando {} KMs", kms.size());
+
+        return ResponseEntity.ok(kms);
+
+    }
+
+    /**
+     * ✅ Adiciona novo KM
+     */
+    @PostMapping("/kms")
+    public ResponseEntity<KmRodoviaDTO> adicionarKm(@RequestBody KmRodoviaDTO kmRodoviaDTO) {
+        log.info("➕ [Eixo] Adicionando KM: {} para rodovia ID: {}", kmRodoviaDTO.getValor(), kmRodoviaDTO.getRodoviaId());
+
+        // Cria entidade a partir do DTO
+        KmRodovia km = new KmRodovia();
+        km.setValor(kmRodoviaDTO.getValor());
+
+        // Precisa buscar a rodovia pelo ID
+        Rodovia rodovia = new Rodovia();
+        rodovia.setId(kmRodoviaDTO.getRodoviaId());
+        km.setRodovia(rodovia);
+
+        // Salva
+        KmRodovia savedKm = gestaoRodoviaService.salvarKm(km);
+
+        //Retorna DTO
+        return ResponseEntity.ok(convertToKmDTO(savedKm));
+    }
     // ==================================================================================
     // 3. COMPATIBILIDADE / LEGADO (MAPA)
     // ==================================================================================
@@ -167,6 +206,17 @@ public class RadarsController {
         return RodoviaDTO.builder()
                 .id(rodovia.getId())
                 .nome(rodovia.getNome())
+                .build();
+    }
+
+    /**
+     * Converte entidade KmRodovia para DTO
+     */
+    private KmRodoviaDTO convertToKmDTO(KmRodovia km) {
+        return KmRodoviaDTO.builder()
+                .id(km.getId())
+                .valor(km.getValor())
+                .rodoviaId(km.getRodovia().getId())
                 .build();
     }
 

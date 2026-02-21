@@ -1,6 +1,9 @@
 package com.coruja.services;
 
+import com.coruja.dto.KmRodoviaDTO;
+import com.coruja.entities.KmRodovia;
 import com.coruja.entities.Rodovia;
+import com.coruja.repositories.KmRodoviaRepository;
 import com.coruja.repositories.RodoviaRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -10,6 +13,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @Service
@@ -18,6 +22,11 @@ import java.util.stream.Collectors;
 public class GestaoRodoviaService {
 
     private final RodoviaRepository rodoviaRepository;
+    private final KmRodoviaRepository kmRodoviaRepository;
+
+    //Cache Thread-safe
+    private final ConcurrentHashMap<String, Rodovia> rodoviaCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, Set<String>> kmCachePorRodovia = new ConcurrentHashMap<>();
 
     /**
      * Lista todas as rodovias cadastradas.
@@ -25,8 +34,11 @@ public class GestaoRodoviaService {
      */
     @Cacheable(value = "lista-rodovias")
     public List<Rodovia> listarRodovias() {
-        log.info("🔍 Buscando rodovias no banco de dados...");
-        return rodoviaRepository.findAll();
+        log.info("🚚 Cache de rodovias vazio, carregando do banco de dados Eixo...");
+        if (rodoviaCache.isEmpty()) {
+            rodoviaRepository.findAll().forEach(r -> rodoviaCache.putIfAbsent(r.getNome(), r));
+        }
+        return new ArrayList<>(rodoviaCache.values());
     }
 
     /**
@@ -39,8 +51,10 @@ public class GestaoRodoviaService {
         if (rodoviaRepository.existsByNome(rodovia.getNome())) {
             throw new IllegalArgumentException("Rodovia '" + rodovia.getNome() + "' já existe.");
         }
-        log.info("💾 Salvando nova rodovia: {}", rodovia.getNome());
-        return rodoviaRepository.save(rodovia);
+        log.info("💾 Salvando nova rodovia Concessionária EixoArqu: {}", rodovia.getNome());
+        Rodovia salva = rodoviaRepository.save(rodovia);
+        rodoviaCache.put(salva.getNome(), salva);
+        return salva;
     }
 
     @Transactional
@@ -50,40 +64,98 @@ public class GestaoRodoviaService {
     }
 
     /**
-     * ✅ MÉTODO REFATORADO: APRENDIZADO EM LOTE OTIMIZADO
+     * Lista Kms por rodovia.
+     */
+    @Cacheable(value = "lista-kms", key = "#rodoviaId")
+    public List<KmRodoviaDTO> listarKmsPorRodovia(Long rodoviaId) {
+        List<KmRodovia> kms = kmRodoviaRepository.findByRodoviaId(rodoviaId);
+
+        // Converte para DTO antes de cachear/retornar
+        return  kms.stream()
+                .map(this::toDTO)
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Salva Kms por rodovia.
+     */
+    @Transactional
+    @CacheEvict(value = "lista-kms", key = "#km.rodovia.id")
+    public KmRodovia salvarKm(KmRodovia km) {
+        return kmRodoviaRepository.save(km);
+    }
+
+    /**
+     * Deleta Kms por rodovia.
+     */
+    @Transactional
+    @CacheEvict(value = "lista-kms", allEntries = true)
+    public void deletarKm(Long id) {
+        kmRodoviaRepository.deleteById(id);
+    }
+
+    // Método auxiliar de conversão
+    private KmRodoviaDTO toDTO(KmRodovia entity) {
+        return new KmRodoviaDTO(
+                entity.getId(),
+                entity.getValor(),
+                entity.getRodovia().getId()
+        );
+    }
+
+    /**
+     * ✅ APRENDIZADO EM LOTE OTIMIZADO
      * 1. Recebe apenas a lista de nomes (List<String>), corrigindo o erro de tipo.
      * 2. Busca todas as rodovias existentes de uma vez.
      * 3. Filtra apenas as que são realmente novas.
      * 4. Salva em lote (saveAll), reduzindo drasticamente o tempo de conexão com o banco.
      */
     @Transactional
-    @CacheEvict(value = "lista-rodovias", allEntries = true)
-    public void registrarDescobertas(List<String> nomesBrutos) {
-        if (nomesBrutos == null || nomesBrutos.isEmpty()) return;
+    @CacheEvict(value = {"lista-rodovias", "lista-kms"}, allEntries = true)
+    public void registrarDescobertas(Map<String, Set<String>> descobertas) {
+        if (descobertas == null || descobertas.isEmpty()) return;
+
+        log.info("🧠 Aprendizado de domínio: Processando {} rodovias Concessionária Eixo...", descobertas.size());
+
+        if (rodoviaCache.isEmpty()) {
+            rodoviaRepository.findAll().forEach(r -> rodoviaCache.put(r.getNome(), r));
+        }
 
         // Remove duplicatas da lista recebida (ex: 50 registros da mesma rodovia no arquivo)
-        Set<String> nomesUnicos = new HashSet<>(nomesBrutos);
+        //Set<String> nomesUnicos = new HashSet<>(descobertas);
 
-        log.info("🧠 Aprendizado de domínio: Analisando {} nomes únicos...", nomesUnicos.size());
+        //log.info("🧠 Aprendizado de domínio: Analisando {} nomes únicos...", nomesUnicos.size());
 
-        // Busca todas as rodovias que JÁ existem no banco para comparar na memória
-        // (Isso é muito mais rápido do que fazer um 'existsByNome' para cada item)
-        Set<String> rodoviasExistentes = rodoviaRepository.findAll().stream()
-                .map(Rodovia::getNome)
-                .collect(Collectors.toSet());
+        List<KmRodovia> novosKms = new ArrayList<>();
 
-        // Filtra: Quero apenas o que NÃO está no banco
-        List<Rodovia> novasRodovias = nomesUnicos.stream()
-                .filter(nome -> !rodoviasExistentes.contains(nome))
-                .map(nome -> Rodovia.builder().nome(nome).build())
-                .collect(Collectors.toList());
+        descobertas.forEach((String nomeRodovia, Set<String> listaKms) -> {
+            // Garante a Rodovia
+            Rodovia rodovia = rodoviaCache.computeIfAbsent(nomeRodovia, nome -> {
+                log.info("🆕 Registrando nova Rodovia, Concessionária Eixo: {}", nome);
+                return rodoviaRepository.save(Rodovia.builder().nome(nome).build());
+            });
 
-        if (!novasRodovias.isEmpty()) {
-            rodoviaRepository.saveAll(novasRodovias);
-            log.info("✅ {} novas rodovias cadastradas no domínio.", novasRodovias.size());
-            novasRodovias.forEach(r -> log.debug("   > Nova: {}", r.getNome()));
-        } else {
-            log.info("🏁 Nenhuma nova rodovia encontrada. O domínio já está atualizado.");
+            // Garante os KMs
+            Set<String> kmsExistentes = kmCachePorRodovia.computeIfAbsent(rodovia.getId(), id ->
+                    kmRodoviaRepository.findByRodoviaId(id).stream()
+                            .map(KmRodovia::getValor)
+                            .collect(Collectors.toCollection(HashSet::new))
+            );
+
+            for (String valorKm : listaKms) {
+                synchronized (kmsExistentes) {
+                    if (kmsExistentes.add(valorKm)) {
+                        novosKms.add(KmRodovia.builder().valor(valorKm).rodovia(rodovia).build());
+                    }
+                }
+            }
+        });
+
+        // 3. Persistência em lote (Batch) para performance
+        if (!novosKms.isEmpty()) {
+            kmRodoviaRepository.saveAll(novosKms);
+            log.info("✅ Sucesso: {} novos KMs cadastrados no domínio Eixo.", novosKms.size());
         }
+
     }
 }
