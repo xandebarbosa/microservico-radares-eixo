@@ -1,6 +1,7 @@
 package com.coruja.repositories;
 
 import com.coruja.entities.Radars;
+import com.coruja.enuns.TipoFonte;
 import jakarta.persistence.QueryHint;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -47,7 +48,7 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
     SELECT DISTINCT ON (r.data, r.hora, r.placa) r.* FROM radars_eixo r
     WHERE 1=1
     AND (CAST(:rodovia AS TEXT) IS NULL
-         OR TRIM(UPPER(unaccent(r.rodovia))) ILIKE CONCAT('%', TRIM(UPPER(unaccent(CAST(:rodovia AS TEXT)))), '%'))    
+         OR TRIM(UPPER(unaccent(r.rodovia))) ILIKE CONCAT('%', TRIM(UPPER(unaccent(CAST(:rodovia AS TEXT)))), '%'))
     AND (CAST(:km AS TEXT) IS NULL OR CAST(:km AS TEXT) = '' OR TRIM(r.km) = TRIM(CAST(:km AS TEXT)))
     AND (CAST(:sentido AS TEXT) IS NULL
          OR TRIM(UPPER(unaccent(r.sentido))) = TRIM(UPPER(unaccent(CAST(:sentido AS TEXT)))))
@@ -149,5 +150,93 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
         ORDER BY CAST(REGEXP_REPLACE(km, '[^0-9.]', '', 'g') AS NUMERIC)
         """, nativeQuery = true)
     List<String> findDistinctKmsByRodoviaOtimizado(@Param("rodovia") String rodovia);
+
+    // ─────────────────────────────────────────────────────────────
+    // BUSCA POR LOCAL — RECEBIDOS (rodovia, sem KM obrigatório)
+    // ─────────────────────────────────────────────────────────────
+    /**
+     * Filtro principal para registros da pasta /recebidos.
+     * O campo KM pode estar vazio; a filtragem por KM é ignorada neste fluxo.
+     */
+    @Query(value = """
+        SELECT DISTINCT ON (r.data, r.hora, r.placa) r.*
+        FROM radars_eixo r
+        WHERE r.tipo_fonte = 'RECEBIDOS'
+        AND (CAST(:rodovia AS TEXT) IS NULL
+             OR TRIM(UPPER(unaccent(r.rodovia))) ILIKE CONCAT('%', TRIM(UPPER(unaccent(CAST(:rodovia AS TEXT)))), '%'))
+        AND (CAST(:sentido AS TEXT) IS NULL
+             OR TRIM(UPPER(unaccent(r.sentido))) = TRIM(UPPER(unaccent(CAST(:sentido AS TEXT)))))
+        AND (CAST(:data AS DATE) IS NULL OR r.data = CAST(:data AS DATE))
+        AND (CAST(:horaInicial AS TIME) IS NULL OR r.hora >= CAST(:horaInicial AS TIME))
+        AND (CAST(:horaFinal   AS TIME) IS NULL OR r.hora <= CAST(:horaFinal   AS TIME))
+        ORDER BY r.data DESC, r.hora DESC, r.placa
+        """,
+            nativeQuery = true)
+    @QueryHints(@QueryHint(name = "org.hibernate.readOnly", value = "true"))
+    Page<Radars> findByLocalFilterRecebidos(
+            @Param("data")        LocalDate data,
+            @Param("horaInicial") LocalTime horaInicial,
+            @Param("horaFinal")   LocalTime horaFinal,
+            @Param("rodovia")     String rodovia,
+            @Param("sentido")     String sentido,
+            Pageable pageable
+    );
+
+    // ─────────────────────────────────────────────────────────────
+    // BUSCA POR LOCAL — RADAR (rodovia + KM)
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * Filtro principal para registros da pasta /radar.
+     * Aceita filtro de KM (comparação exata após trim).
+     */
+    @Query(value = """
+        SELECT DISTINCT ON (r.data, r.hora, r.placa) r.*
+        FROM radars_eixo r
+        WHERE r.tipo_fonte = 'RADAR'
+        AND (CAST(:rodovia AS TEXT) IS NULL
+             OR TRIM(UPPER(unaccent(r.rodovia))) ILIKE CONCAT('%', TRIM(UPPER(unaccent(CAST(:rodovia AS TEXT)))), '%'))
+        AND (CAST(:km AS TEXT) IS NULL OR TRIM(r.km) = TRIM(CAST(:km AS TEXT)))
+        AND (CAST(:sentido AS TEXT) IS NULL
+             OR TRIM(UPPER(unaccent(r.sentido))) = TRIM(UPPER(unaccent(CAST(:sentido AS TEXT)))))
+        AND (CAST(:data AS DATE) IS NULL OR r.data = CAST(:data AS DATE))
+        AND (CAST(:horaInicial AS TIME) IS NULL OR r.hora >= CAST(:horaInicial AS TIME))
+        AND (CAST(:horaFinal   AS TIME) IS NULL OR r.hora <= CAST(:horaFinal   AS TIME))
+        ORDER BY r.data DESC, r.hora DESC, r.placa
+        """,
+            nativeQuery = true)
+    @QueryHints(@QueryHint(name = "org.hibernate.readOnly", value = "true"))
+    Page<Radars> findByLocalFilterRadar(
+            @Param("data")        LocalDate data,
+            @Param("horaInicial") LocalTime horaInicial,
+            @Param("horaFinal")   LocalTime horaFinal,
+            @Param("rodovia")     String rodovia,
+            @Param("km")          String km,
+            @Param("sentido")     String sentido,
+            Pageable pageable
+    );
+
+    // ─────────────────────────────────────────────────────────────
+    // METADATA — FILTROS
+    // ─────────────────────────────────────────────────────────────
+
+    @Query(value = """
+        SELECT DISTINCT rodovia FROM radars_eixo
+        WHERE data >= CURRENT_DATE - INTERVAL '30 days'
+          AND tipo_fonte = :#{#tipoFonte.name()}
+          AND rodovia IS NOT NULL
+        ORDER BY rodovia
+        """, nativeQuery = true)
+    List<String> findDistinctRodoviasByTipo(@Param("tipoFonte") TipoFonte tipoFonte);
+
+    @Query(value = """
+        SELECT DISTINCT km FROM radars_eixo
+        WHERE rodovia = :rodovia
+          AND tipo_fonte = 'RADAR'
+          AND data >= CURRENT_DATE - INTERVAL '30 days'
+          AND km IS NOT NULL AND km <> ''
+        ORDER BY CAST(REGEXP_REPLACE(km, '[^0-9.]', '', 'g') AS NUMERIC)
+        """, nativeQuery = true)
+    List<String> findDistinctKmsByRodovia(@Param("rodovia") String rodovia);
 
 }
