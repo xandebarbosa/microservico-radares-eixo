@@ -47,8 +47,8 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
     SELECT DISTINCT ON (r.data, r.hora, r.placa) r.* FROM radars_eixo r
     WHERE 1=1
     AND (CAST(:rodovia AS TEXT) IS NULL
-         OR TRIM(UPPER(unaccent(r.rodovia))) ILIKE CONCAT('%', TRIM(UPPER(unaccent(CAST(:rodovia AS TEXT)))), '%'))
-    AND (CAST(:km AS TEXT) IS NULL OR TRIM(r.km) = TRIM(CAST(:km AS TEXT)))
+         OR TRIM(UPPER(unaccent(r.rodovia))) ILIKE CONCAT('%', TRIM(UPPER(unaccent(CAST(:rodovia AS TEXT)))), '%'))    
+    AND (CAST(:km AS TEXT) IS NULL OR CAST(:km AS TEXT) = '' OR TRIM(r.km) = TRIM(CAST(:km AS TEXT)))
     AND (CAST(:sentido AS TEXT) IS NULL
          OR TRIM(UPPER(unaccent(r.sentido))) = TRIM(UPPER(unaccent(CAST(:sentido AS TEXT)))))
     AND (CAST(:data AS DATE) IS NULL OR r.data = CAST(:data AS DATE))

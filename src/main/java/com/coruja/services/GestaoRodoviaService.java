@@ -4,6 +4,7 @@ import com.coruja.dto.KmRodoviaDTO;
 import com.coruja.entities.KmRodovia;
 import com.coruja.entities.Rodovia;
 import com.coruja.repositories.KmRodoviaRepository;
+import com.coruja.repositories.RadarsRepository;
 import com.coruja.repositories.RodoviaRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,6 +24,7 @@ public class GestaoRodoviaService {
 
     private final RodoviaRepository rodoviaRepository;
     private final KmRodoviaRepository kmRodoviaRepository;
+    private final RadarsRepository radarsRepository;
 
     //Cache Thread-safe
     private final ConcurrentHashMap<String, Rodovia> rodoviaCache = new ConcurrentHashMap<>();
@@ -64,15 +66,28 @@ public class GestaoRodoviaService {
     }
 
     /**
-     * Lista Kms por rodovia.
+     * ✅ Busca os KMs diretamente da tabela de domínio que já está populada.
+     * Trocamos o nome do cache para "lista-kms-oficial" para forçar o Redis
+     * a descartar qualquer array vazio [] que tenha ficado preso no cache antigo.
      */
-    @Cacheable(value = "lista-kms", key = "#rodoviaId")
+    @Cacheable(value = "lista-kms-oficial", key = "#rodoviaId")
     public List<KmRodoviaDTO> listarKmsPorRodovia(Long rodoviaId) {
+        log.info("📍 Buscando KMs na tabela de domínio para a rodovia ID: {}", rodoviaId);
+
+        // 1. Busca diretamente da tabela kms_rodovia que já está populada (rápido e direto)
         List<KmRodovia> kms = kmRodoviaRepository.findByRodoviaId(rodoviaId);
 
-        // Converte para DTO antes de cachear/retornar
-        return  kms.stream()
-                .map(this::toDTO)
+        // 2. Converte para DTO, filtra sujeiras da pasta /recebidos e ordena
+        return kms.stream()
+                // Garante que não vai mandar KMs vazios ou nulos pro Front-end
+                .filter(km -> km.getValor() != null && !km.getValor().trim().isEmpty())
+                .map(km -> KmRodoviaDTO.builder()
+                        .id(km.getId())
+                        .valor(km.getValor().trim())
+                        .rodoviaId(rodoviaId)
+                        .build())
+                // Ordena os KMs (ex: 100+000 aparecerá antes de 200+000)
+                .sorted(Comparator.comparing(KmRodoviaDTO::getValor))
                 .collect(Collectors.toList());
     }
 
