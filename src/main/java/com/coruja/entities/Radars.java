@@ -1,5 +1,6 @@
 package com.coruja.entities;
 
+import com.coruja.enuns.TipoFonte;
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -9,10 +10,14 @@ import java.time.LocalTime;
 @Entity
 @Table(name = "radars_eixo",
         indexes = {
-                @Index(name = "idx_radars_placa", columnList = "placa")
+                @Index(name = "idx_radars_placa",       columnList = "placa"),
+                @Index(name = "idx_radars_tipo_fonte",  columnList = "tipo_fonte"),
+                @Index(name = "idx_radars_data_hora",   columnList = "data DESC, hora DESC"),
+                @Index(name = "idx_radars_rodovia_km",  columnList = "rodovia, km")
         }
 )
 @AllArgsConstructor
+@NoArgsConstructor
 @Getter
 @Setter
 @Builder
@@ -32,27 +37,31 @@ public class Radars {
 
     @Column(name = "rodovia")
     private String rodovia;
+
+    /**
+     * KM da rodovia. Pode ser nulo/vazio para registros da pasta /recebidos.
+     */
+    @Column(length = 20)
     private String km;
+
+    @Column(length = 50)
     private String sentido;
+
+    /**
+     * Discriminador de origem: RECEBIDOS (sem KM) ou RADAR (com KM).
+     * Nunca nulo — default RECEBIDOS para retrocompatibilidade.
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "tipo_fonte", nullable = false, length = 20)
+    @Builder.Default
+    private TipoFonte tipoFonte = TipoFonte.RECEBIDOS;
 
     // Muitos registros de 'Radars' podem estar associados a Uma 'LocalizacaoRadar'.
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "localizacao_id")// Nome da coluna da chave estrangeira no banco
     private  LocalizacaoRadar localizacao;
 
-    // Construtor padrão (obrigatório para o Hibernate)
-    public Radars() {
-    }
 
-    public Radars(LocalDate data, LocalTime hora, String placa, String rodovia, String km, String sentido, LocalizacaoRadar localizacao) {
-        this.data = data;
-        this.hora = hora;
-        this.placa = placa;
-        this.rodovia = rodovia;
-        this.km = km != null ? km : "";
-        this.sentido = sentido;
-        this.localizacao = localizacao;
-    }
 
 
 }
