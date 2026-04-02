@@ -53,10 +53,9 @@ public class RadarsService {
     /** Cache de normalização de strings para evitar reprocessamento. */
     private final ConcurrentHashMap<String, String> normalizeCache = new ConcurrentHashMap<>(512);
 
-    // ─────────────────────────────────────────────────────────────
-    // BUSCA POR PLACA
-    // ─────────────────────────────────────────────────────────────
-
+    /**
+     * Busca ESPECÍFICA por placa: Retorna histórico completo.
+     */
     @Transactional(readOnly = true)
     @Timed(value = "radares.busca.placa", histogram = true)
     public Page<RadarsDTO> buscarPorPlaca(String placa, Pageable pageable) {
@@ -83,30 +82,19 @@ public class RadarsService {
     @Transactional(readOnly = true)
     @Timed(value = "radares.busca.local", histogram = true)
     public RadarPageDTO buscarPorLocal(BuscaLocalRequest req, Pageable pageable) {
-        log.info("[Eixo] buscarPorLocal | fonte={} | data={} | rodovia='{}' | km='{}' | sentido='{}'",
-                req.getTipoFonte(), req.getData(), req.getRodovia(), req.getKm(), req.getSentido());
+        log.info("[Eixo] buscarPorLocal | data={} | rodovia='{}' | km='{}' | sentido='{}'",
+                req.getData(), req.getRodovia(), req.getKm(), req.getSentido());
 
-        Page<Radars> page = switch (req.getTipoFonte()) {
-
-            case RECEBIDOS -> radarsRepository.findByLocalFilterRecebidos(
-                    req.getData(),
-                    req.getHoraInicial(),
-                    req.getHoraFinal(),
-                    normalize(req.getRodovia()),
-                    normalize(req.getSentido()),
-                    pageable
-            );
-
-            case RADAR -> radarsRepository.findByLocalFilterRadar(
-                    req.getData(),
-                    req.getHoraInicial(),
-                    req.getHoraFinal(),
-                    normalize(req.getRodovia()),
-                    normalize(req.getKm()),
-                    normalize(req.getSentido()),
-                    pageable
-            );
-        };
+        // Usamos a query unificada que procura em TUDO (Radar e Recebidos)
+        Page<Radars> page = radarsRepository.findByLocalFilter(
+                req.getData(),
+                req.getHoraInicial(),
+                req.getHoraFinal(),
+                normalize(req.getRodovia()),
+                normalize(req.getKm()),
+                normalize(req.getSentido()),
+                pageable
+        );
 
         log.info("[Eixo] Resultado: {} registros (página {})", page.getTotalElements(), page.getNumber());
         return toPageDTO(page);
@@ -231,7 +219,9 @@ public class RadarsService {
 
         return normalizeCache.computeIfAbsent(input, i -> {
             try {
-                return URLDecoder.decode(i, StandardCharsets.UTF_8).trim().toUpperCase();
+                //return URLDecoder.decode(i, StandardCharsets.UTF_8).trim().toUpperCase();
+                log.info("Normalizado: {}", input);
+                return i.trim().toUpperCase();
             } catch (Exception e) {
                 log.warn("[Eixo] Erro ao normalizar '{}': {}", i, e.getMessage());
                 return i.trim().toUpperCase();

@@ -57,10 +57,13 @@ public class RadarLineParser {
 
             if (placa.length() < 7 && !placa.equals("N/I")) return Optional.empty();
 
-            String[] dhParts = dataHoraStr.split("T");
+            String[] dhParts = dataHoraStr.split("[T\\s]+");
             if (dhParts.length < 2) return Optional.empty();
 
-            LocalDate data = LocalDate.parse(dhParts[0]);
+            LocalDate data = dhParts[0].contains("/")
+                    ? LocalDate.parse(dhParts[0], java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"))
+                    : LocalDate.parse(dhParts[0]);
+
             LocalTime hora = LocalTime.parse(dhParts[1].replace("-", ":").split("\\.")[0]);
 
             String rodoviaFinal;
@@ -76,15 +79,11 @@ public class RadarLineParser {
                 String chave = normalizar(localizacaoBruta);
                 localizacao  = pracaCache.get(chave);
 
-                if (localizacao != null) {
-                    rodoviaFinal = localizacao.getRodovia();
-                    kmFinal      = ""; // sem KM neste fluxo
-                } else {
-                    rodoviaFinal = localizacaoBruta.length() > 100
-                            ? localizacaoBruta.substring(0, 100)
-                            : localizacaoBruta;
-                    kmFinal = "";
-                }
+                // SALVA TUDO NA RODOVIA: "P1 - Rio Claro" vai direto para a coluna rodovia
+                rodoviaFinal = localizacaoBruta.length() > 255
+                        ? localizacaoBruta.substring(0, 255)
+                        : localizacaoBruta;
+                kmFinal = ""; // Sem KM
             }
 
             Radars radar = Radars.builder()

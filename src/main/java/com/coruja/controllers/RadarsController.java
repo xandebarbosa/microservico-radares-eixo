@@ -31,10 +31,6 @@ public class RadarsController {
     private final RadarsService        radarsService;
     private final GestaoRodoviaService gestaoRodoviaService;
 
-    // ─────────────────────────────────────────────────────────────
-    // BUSCA POR PLACA
-    // ─────────────────────────────────────────────────────────────
-
     /**
      * Histórico completo de passagens de uma placa (todas as fontes).
      */
@@ -45,6 +41,62 @@ public class RadarsController {
 
         log.info("[Eixo] busca-placa: {}", placa);
         return ResponseEntity.ok(radarsService.buscarPorPlaca(placa, pageable));
+    }
+
+    /**
+     * Busca por local por concessionária - com filtros.
+     */
+    @GetMapping("/busca-local")
+    public ResponseEntity<RadarPageDTO> buscarPorLocal(
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicial,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal,
+            @RequestParam(required = false) String rodovia,
+            @RequestParam(required = false) String km,
+            @RequestParam(required = false) String sentido,
+            @PageableDefault(size = 20, sort = {"data", "hora"}, direction = Sort.Direction.DESC) Pageable pageable) {
+
+        // Limpa qualquer lixo de duplo encoding que o BFF possa ter enviado
+        // e garante que o espaço (criado pelo Tomcat) volta a ser o sinal de +
+        if (km != null) {
+            km = km.replace("%252B", "+") // Limpa erro de duplo encoding
+                    .replace("%2B", "+")   // Limpa encoding simples
+                    .replace(" ", "+");    // Restaura o espaço para o sinal de + original
+        }
+
+        // Limpa double encoding da rodovia — BFF envia P5%2520-%2520Jau ou P5%20-%20Jau
+        if (rodovia != null) {
+            try {
+                // Decodifica uma vez para resolver o %20 que o Tomcat não decodificou
+                rodovia = java.net.URLDecoder.decode(rodovia, java.nio.charset.StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                log.warn("[Eixo] Erro ao decodificar rodovia '{}': {}", rodovia, e.getMessage());
+            }
+        }
+
+        boolean temKm = km != null && !km.isBlank();
+        TipoFonte tipoFonte = temKm ? TipoFonte.RADAR : TipoFonte.RECEBIDOS;
+
+        log.info("[Eixo] busca-local | tipoFonte={} | data={} | rodovia='{}' | km='{}' | sentido='{}'",
+                tipoFonte, data, rodovia, km, sentido);
+
+        // LOG DIAGNÓSTICO — remover após confirmar
+        log.info("[Eixo][DIAG] rodovia raw='{}' | km raw='{}' | tipoFonte={}",
+                rodovia, km, tipoFonte);
+        log.info("[Eixo][DIAG] rodovia normalizada='{}'",
+                rodovia != null ? java.net.URLDecoder.decode(rodovia, java.nio.charset.StandardCharsets.UTF_8).trim().toUpperCase() : "null");
+
+        BuscaLocalRequest req = BuscaLocalRequest.builder()
+                .data(data)
+                .horaInicial(horaInicial)
+                .horaFinal(horaFinal)
+                .rodovia(rodovia)
+                .km(temKm ? km : null)
+                .sentido(sentido)
+                .tipoFonte(tipoFonte) // ← estava faltando: sem isso o switch no RadarsService lança NullPointerException
+                .build();
+
+        return ResponseEntity.ok(radarsService.buscarPorLocal(req, pageable));
     }
 
     // ─────────────────────────────────────────────────────────────

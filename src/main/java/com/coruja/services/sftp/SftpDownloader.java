@@ -1,10 +1,16 @@
 package com.coruja.services.sftp;
 
+import com.coruja.entities.ArquivoSftpProcessado;
+import com.coruja.enuns.StatusProcessamento;
+import com.coruja.enuns.TipoFonte;
+import com.coruja.repositories.ArquivoSftpProcessadoRepository;
 import com.jcraft.jsch.ChannelSftp;
 import com.jcraft.jsch.SftpException;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -12,6 +18,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.regex.Matcher;
@@ -19,33 +26,28 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
- * Responsável exclusivamente pelo download de arquivos via SFTP.
+ * Baixa arquivos SFTP em <b>lotes configuráveis</b>, registrando cada arquivo no banco
+ * de dados antes e depois do download.
  *
- * <h3>Estratégia anti-duplicação (dois níveis):</h3>
- * <ol>
- *   <li><b>Em memória entre ciclos:</b> sets {@code arquivosBaixadosRecebidos} e
- *       {@code arquivosBaixadosRadar} são campos da classe e acumulam os nomes de
- *       todos os arquivos já baixados desde que o container subiu. Na primeira
- *       execução são pré-carregados com o conteúdo do disco (para sobreviver a
- *       restarts com volume persistido).</li>
- *   <li><b>Em disco:</b> antes de baixar, verifica se o arquivo já existe
- *       localmente via {@link Files#exists}.</li>
- * </ol>
- *
- * <h3>Filtro de subpastas (/radar):</h3>
- * As subpastas de /radar têm nome no formato yyyyMMdd (ex: 20260223).
- * O código filtra as subpastas pelo nome ANTES de entrar nelas, evitando
- * varrer centenas de subpastas antigas desnecessariamente.
- *
- * <h3>Formatos de nome de arquivo suportados:</h3>
+ * <h3>Mudanças em relação à versão anterior:</h3>
  * <ul>
- *   <li>{@code EIXOSP_2026-02-23T14-38-176641.csv} → extrai yyyy-MM-dd antes do T</li>
- *   <li>{@code EIXOSP_20260223142509281.csv}        → extrai 8 dígitos após o _</li>
+ *   <li>Controle de duplicatas migrado de sets in-memory para {@link ArquivoSftpProcessadoRepository}
+ *       → sobrevive a restarts do container.</li>
+ *   <li>Downloads ocorrem em lotes ({@code sftp.download.batch.size}, padrão 50 arquivos).
+ *       Cada lote é retornado ao {@link SftpOrchestrator} para processamento imediato,
+ *       liberando memória antes do próximo lote.</li>
+ *   <li>Cada arquivo é persistido com status {@code BAIXADO} assim que chega no disco,
+ *       e atualizado para {@code PROCESSADO} ou {@code ERRO} pelo orquestrador.</li>
+ *   <li>Arquivos com status {@code ERRO} e menos de {@code sftp.max.tentativas} (padrão 3)
+ *       são elegíveis para reprocessamento.</li>
  * </ul>
  */
 @Component
 @Slf4j
+@RequiredArgsConstructor
 public class SftpDownloader {
+
+    // ─── Configurações ───────────────────────────────────────────
 
     @Value("${sftp.remote.directory:/recebidos}")
     private String remoteDirRecebidos;
@@ -56,117 +58,88 @@ public class SftpDownloader {
     @Value("${sftp.local.directory}")
     private String localBaseDirectory;
 
-    /**
-     * Janela retroativa em dias. Padrão: 1 (hoje e ontem).
-     * Configurável via {@code sftp.download.limite.dias}.
-     */
     @Value("${sftp.download.limite.dias:1}")
     private int limiteDias;
 
-    /**
-     * Cache em memória de arquivos já baixados — persiste entre ciclos do scheduler
-     * enquanto o container estiver no ar. Evita redownload mesmo que o disco seja
-     * efêmero (container sem volume).
-     */
-    private final Set<String> arquivosBaixadosRecebidos = Collections.synchronizedSet(new HashSet<>());
-    private final Set<String> arquivosBaixadosRadar     = Collections.synchronizedSet(new HashSet<>());
-    private boolean cacheInicializado = false;
+    /** Quantos arquivos baixar por lote antes de devolver ao orquestrador para processamento. */
+    @Value("${sftp.download.batch.size:50}")
+    private int batchSize;
 
-    // Formato 1: yyyy-MM-ddT  →  EIXOSP_2026-02-23T14-38-176641.csv
-    private static final Pattern PATTERN_ISO_T          = Pattern.compile("(\\d{4}-\\d{2}-\\d{2})T");
-    // Formato 2: _yyyyMMdd    →  EIXOSP_20260223142509281.csv
+    /** Máximo de tentativas antes de abandonar um arquivo com erro. */
+    @Value("${sftp.max.tentativas:3}")
+    private int maxTentativas;
+
+    // ─── Dependências ────────────────────────────────────────────
+
+    private final ArquivoSftpProcessadoRepository arquivoRepo;
+
+    // ─── Patterns ────────────────────────────────────────────────
+
+    private static final Pattern PATTERN_ISO_T           = Pattern.compile("(\\d{4}-\\d{2}-\\d{2})T");
     private static final Pattern PATTERN_APOS_UNDERSCORE = Pattern.compile("_(\\d{8})");
-    // Pasta com nome yyyyMMdd →  20260223  (subpastas de /radar)
-    private static final Pattern PATTERN_PASTA_DATA     = Pattern.compile("^(\\d{8})$");
-
-    private static final DateTimeFormatter FMT_YYYYMMDD = DateTimeFormatter.ofPattern("yyyyMMdd");
+    private static final Pattern PATTERN_PASTA_DATA      = Pattern.compile("^(\\d{8})$");
+    private static final DateTimeFormatter FMT_YYYYMMDD  = DateTimeFormatter.ofPattern("yyyyMMdd");
 
     // ─────────────────────────────────────────────────────────────
     // API PÚBLICA
     // ─────────────────────────────────────────────────────────────
 
-    public DownloadResult baixarArquivosNovos(ChannelSftp sftp) throws IOException {
+    /**
+     * Descobre arquivos novos no SFTP e os entrega ao {@code consumer} em lotes.
+     *
+     * <p>O consumer (normalmente o {@link SftpOrchestrator}) processa cada lote
+     * imediatamente — sem acumular todos os arquivos em memória.
+     *
+     * @param sftp     Canal SFTP aberto.
+     * @param consumer Callback chamado a cada lote; recebe o lote e o TipoFonte.
+     * @return Resumo total de arquivos baixados (somando todos os lotes).
+     */
+    public DownloadSummary baixarEmLotes(ChannelSftp sftp, BatchConsumer consumer)
+            throws IOException {
+
         Path localRecebidos = Path.of(localBaseDirectory, "recebidos");
         Path localRadar     = Path.of(localBaseDirectory, "radar");
         Files.createDirectories(localRecebidos);
         Files.createDirectories(localRadar);
 
-        // Na primeira execução, pré-carrega o cache com arquivos já presentes no disco
-        // (útil quando há volume Docker persistido — evita redownload após restart)
-        if (!cacheInicializado) {
-            arquivosBaixadosRecebidos.addAll(listarArquivosLocais(localRecebidos));
-            arquivosBaixadosRadar.addAll(listarArquivosLocaisRecursivo(localRadar));
-            cacheInicializado = true;
-            log.info("[SFTP] Cache inicializado: {} já conhecido(s) em /recebidos | {} em /radar.",
-                    arquivosBaixadosRecebidos.size(), arquivosBaixadosRadar.size());
-        }
-
         LocalDate dataLimite = LocalDate.now().minusDays(limiteDias);
-        log.info("[SFTP] Limite: {} dia(s) → aceitando arquivos/pastas a partir de {}.", limiteDias, dataLimite);
-        log.info("[SFTP] Cache atual: {} conhecido(s) em /recebidos | {} em /radar.",
-                arquivosBaixadosRecebidos.size(), arquivosBaixadosRadar.size());
+        log.info("[SFTP] Limite: {} dia(s) → aceitando arquivos a partir de {}.", limiteDias, dataLimite);
 
-        List<Path> recebidos = baixarPastaRecebidos(sftp, localRecebidos, arquivosBaixadosRecebidos, dataLimite);
-        List<Path> radar     = baixarPastaRadar(sftp, remoteDirRadar, localRadar, arquivosBaixadosRadar, dataLimite);
+        // Carrega nomes já conhecidos do banco UMA VEZ para evitar N selects na listagem
+        Set<String> jaConhecidosRecebidos = arquivoRepo.findNomesByTipoFonte(TipoFonte.RECEBIDOS);
+        Set<String> jaConhecidosRadar     = arquivoRepo.findNomesByTipoFonte(TipoFonte.RADAR);
 
-        log.info("[SFTP] Concluído: {} novo(s) de /recebidos | {} novo(s) de /radar.",
-                recebidos.size(), radar.size());
+        log.info("[SFTP] Já conhecidos no banco: {} /recebidos | {} /radar.",
+                jaConhecidosRecebidos.size(), jaConhecidosRadar.size());
 
-        return new DownloadResult(recebidos, radar);
+        int totalRecebidos = processarPastaEmLotes(
+                sftp, remoteDirRecebidos, localRecebidos,
+                TipoFonte.RECEBIDOS, jaConhecidosRecebidos, dataLimite, consumer);
+
+        int totalRadar = processarPastaEmLotes(
+                sftp, remoteDirRadar, localRadar,
+                TipoFonte.RADAR, jaConhecidosRadar, dataLimite, consumer);
+
+        return new DownloadSummary(totalRecebidos, totalRadar);
     }
 
     // ─────────────────────────────────────────────────────────────
-    // /recebidos  — sem subpastas, filtra por data no nome do arquivo
+    // PROCESSAMENTO POR PASTA (com suporte a subpastas recursivas)
     // ─────────────────────────────────────────────────────────────
 
     @SuppressWarnings("unchecked")
-    private List<Path> baixarPastaRecebidos(
-            ChannelSftp sftp,
-            Path localPath,
-            Set<String> locais,
-            LocalDate dataLimite) {
-
-        List<Path> baixados = new ArrayList<>();
-        try {
-            sftp.cd(remoteDirRecebidos);
-            Vector<ChannelSftp.LsEntry> entries = sftp.ls(".");
-            log.info("[SFTP] Varrendo '{}': {} entrada(s).", remoteDirRecebidos, entries.size());
-
-            for (ChannelSftp.LsEntry entry : entries) {
-                String nome = entry.getFilename();
-                if (nome.startsWith(".") || entry.getAttrs().isDir()) continue;
-
-                if (locais.contains(nome)) {
-                    log.debug("[SFTP] Já baixado, ignorando: {}", nome);
-                    continue;
-                }
-                if (!isDentroDoPeriodo(nome, dataLimite)) {
-                    log.debug("[SFTP] Fora do período ({}): {}", dataLimite, nome);
-                    continue;
-                }
-
-                baixarArquivo(sftp, nome, localPath, locais).ifPresent(baixados::add);
-            }
-        } catch (SftpException e) {
-            log.error("[SFTP] Erro ao varrer '{}': {}", remoteDirRecebidos, e.getMessage());
-        }
-        return baixados;
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // /radar  — subpastas filtradas por data no NOME DA PASTA
-    //           arquivos filtrados por data no nome do arquivo
-    // ─────────────────────────────────────────────────────────────
-
-    @SuppressWarnings("unchecked")
-    private List<Path> baixarPastaRadar(
+    private int processarPastaEmLotes(
             ChannelSftp sftp,
             String remotePath,
             Path localPath,
-            Set<String> locais,
-            LocalDate dataLimite) {
+            TipoFonte tipoFonte,
+            Set<String> jaConhecidos,
+            LocalDate dataLimite,
+            BatchConsumer consumer) {
 
-        List<Path> baixados = new ArrayList<>();
+        int totalBaixados = 0;
+        List<Path> loteAtual = new ArrayList<>(batchSize);
+
         try {
             sftp.cd(remotePath);
             Vector<ChannelSftp.LsEntry> entries = sftp.ls(".");
@@ -177,156 +150,188 @@ public class SftpDownloader {
                 if (nome.startsWith(".")) continue;
 
                 if (entry.getAttrs().isDir()) {
-                    // Se o nome da pasta for yyyyMMdd, filtra por data antes de entrar
+                    // Subpastas: filtra por data (apenas /radar tem subpastas yyyyMMdd)
                     if (pastaForaDoPeriodo(nome, dataLimite)) {
                         log.debug("[SFTP] Subpasta fora do período, pulando: {}/{}", remotePath, nome);
                         continue;
                     }
-                    // Entra recursivamente na subpasta
                     Path subLocal = localPath.resolve(nome);
                     Files.createDirectories(subLocal);
-                    // Passa o mesmo set global (arquivosBaixadosRadar) para que
-                    // arquivos baixados em qualquer subpasta bloqueiem redownload em outras
-                    baixados.addAll(
-                            baixarPastaRadar(sftp, remotePath + "/" + nome,
-                                    subLocal, locais, dataLimite)
-                    );
+                    totalBaixados += processarPastaEmLotes(
+                            sftp, remotePath + "/" + nome, subLocal,
+                            tipoFonte, jaConhecidos, dataLimite, consumer);
                     sftp.cd(remotePath);
                     continue;
                 }
 
-                // Arquivo folha
-                if (locais.contains(nome)) {
-                    log.debug("[SFTP] Já baixado, ignorando: {}", nome);
+                // ── Arquivo folha ────────────────────────────────────────
+                if (jaConhecidos.contains(nome)) {
+                    log.debug("[SFTP] Já conhecido no banco, ignorando: {}", nome);
                     continue;
                 }
                 if (!isDentroDoPeriodo(nome, dataLimite)) {
-                    log.debug("[SFTP] Arquivo fora do período ({}): {}", dataLimite, nome);
+                    log.debug("[SFTP] Arquivo fora do período: {}", nome);
                     continue;
                 }
 
-                baixarArquivo(sftp, nome, localPath, locais).ifPresent(baixados::add);
+                Optional<Path> baixado = baixarArquivo(sftp, nome, localPath, tipoFonte, jaConhecidos);
+                baixado.ifPresent(p -> {
+                    loteAtual.add(p);
+                    log.debug("[SFTP] Adicionado ao lote: {} ({}/{})", nome, loteAtual.size(), batchSize);
+                });
+
+                // Quando o lote atinge o tamanho configurado, entrega para processamento
+                if (loteAtual.size() >= batchSize) {
+                    log.info("[SFTP] Lote de {} arquivo(s) pronto para processamento ({}).",
+                            loteAtual.size(), tipoFonte);
+                    consumer.processar(new ArrayList<>(loteAtual), tipoFonte);
+                    totalBaixados += loteAtual.size();
+                    loteAtual.clear();
+                }
             }
         } catch (SftpException e) {
             log.error("[SFTP] Erro ao varrer '{}': {}", remotePath, e.getMessage());
         } catch (IOException e) {
             log.error("[SFTP] Erro de I/O em '{}': {}", remotePath, e.getMessage());
         }
-        return baixados;
+
+        // Processa o lote residual (último lote, menor que batchSize)
+        if (!loteAtual.isEmpty()) {
+            log.info("[SFTP] Lote residual de {} arquivo(s) ({}).", loteAtual.size(), tipoFonte);
+            consumer.processar(new ArrayList<>(loteAtual), tipoFonte);
+            totalBaixados += loteAtual.size();
+            loteAtual.clear();
+        }
+
+        return totalBaixados;
     }
 
     // ─────────────────────────────────────────────────────────────
-    // DOWNLOAD
+    // DOWNLOAD + REGISTRO NO BANCO
     // ─────────────────────────────────────────────────────────────
 
     /**
-     * Baixa um arquivo e, se bem-sucedido, adiciona o nome ao set de locais
-     * para evitar redownload na mesma execução do ciclo.
+     * Baixa um arquivo e persiste um registro {@code BAIXADO} no banco.
+     * O status será atualizado pelo orquestrador após o processamento.
      */
-    private Optional<Path> baixarArquivo(ChannelSftp sftp, String nomeRemoto,
-                                         Path destino, Set<String> locais) {
+    @Transactional
+    private Optional<Path> baixarArquivo(
+            ChannelSftp sftp,
+            String nomeRemoto,
+            Path destino,
+            TipoFonte tipoFonte,
+            Set<String> jaConhecidos) {
+
         Path alvo = destino.resolve(nomeRemoto);
         try (InputStream is = sftp.get(nomeRemoto)) {
             Files.copy(is, alvo, StandardCopyOption.REPLACE_EXISTING);
-            locais.add(nomeRemoto); // atualiza o set em memória
-            log.info("[SFTP] ✅ Baixado: {}", nomeRemoto);
+
+            // Persiste o registro no banco (status BAIXADO)
+            ArquivoSftpProcessado registro = ArquivoSftpProcessado.builder()
+                    .nomeArquivo(nomeRemoto)
+                    .tipoFonte(tipoFonte)
+                    .status(StatusProcessamento.BAIXADO)
+                    .baixadoEm(LocalDateTime.now())
+                    .tentativas(0)
+                    .build();
+            arquivoRepo.save(registro);
+
+            // Atualiza o set in-memory para não tentar baixar novamente no mesmo ciclo
+            jaConhecidos.add(nomeRemoto);
+
+            log.info("[SFTP] ✅ Baixado e registrado: {}", nomeRemoto);
             return Optional.of(alvo);
+
         } catch (Exception e) {
             log.error("[SFTP] ❌ Falha ao baixar '{}': {}", nomeRemoto, e.getMessage());
+
+            // Registra a falha no banco para auditoria
+            try {
+                ArquivoSftpProcessado falha = ArquivoSftpProcessado.builder()
+                        .nomeArquivo(nomeRemoto)
+                        .tipoFonte(tipoFonte)
+                        .status(StatusProcessamento.ERRO)
+                        .baixadoEm(LocalDateTime.now())
+                        .mensagemErro("Falha no download: " + e.getMessage())
+                        .tentativas(1)
+                        .build();
+                arquivoRepo.save(falha);
+                jaConhecidos.add(nomeRemoto); // evita retry infinito no mesmo ciclo
+            } catch (Exception ex) {
+                log.warn("[SFTP] Não foi possível registrar falha no banco para '{}': {}", nomeRemoto, ex.getMessage());
+            }
             return Optional.empty();
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // RETRY DE ARQUIVOS COM ERRO
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * Retorna arquivos que falharam em ciclos anteriores e ainda têm tentativas disponíveis.
+     * Chamado pelo {@link SftpOrchestrator} em ciclos separados para não bloquear novos downloads.
+     */
+    public List<ArquivoSftpProcessado> listarElegiveisParaRetry() {
+        return arquivoRepo.findByStatusAndTentativasLessThan(StatusProcessamento.ERRO, maxTentativas);
     }
 
     // ─────────────────────────────────────────────────────────────
     // FILTROS
     // ─────────────────────────────────────────────────────────────
 
-    /**
-     * Retorna true se a PASTA deve ser PULADA.
-     * Só filtra pastas com nome exatamente no formato yyyyMMdd.
-     * Pastas com outros nomes (ex: "FSCII6568") são sempre visitadas.
-     */
     private boolean pastaForaDoPeriodo(String nomePasta, LocalDate dataLimite) {
         Matcher m = PATTERN_PASTA_DATA.matcher(nomePasta);
-        if (!m.matches()) return false; // nome não é data → não pular
+        if (!m.matches()) return false;
         try {
             LocalDate dataPasta = LocalDate.parse(nomePasta, FMT_YYYYMMDD);
             return dataPasta.isBefore(dataLimite);
         } catch (Exception e) {
-            return false; // parse falhou → não pular por segurança
+            return false;
         }
     }
 
-    /**
-     * Retorna true se o arquivo deve ser baixado.
-     * Arquivos sem data reconhecível no nome são sempre baixados.
-     */
     private boolean isDentroDoPeriodo(String nomeArquivo, LocalDate dataLimite) {
         return extrairDataDoNome(nomeArquivo)
                 .map(d -> !d.isBefore(dataLimite))
-                .orElseGet(() -> {
-                    log.debug("[SFTP] Sem data no nome, baixando por segurança: {}", nomeArquivo);
-                    return true;
-                });
+                .orElse(true); // sem data no nome → baixar por segurança
     }
 
     private Optional<LocalDate> extrairDataDoNome(String nome) {
-        // Formato 1: yyyy-MM-ddT
         Matcher m1 = PATTERN_ISO_T.matcher(nome);
         if (m1.find()) {
             try { return Optional.of(LocalDate.parse(m1.group(1))); } catch (Exception ignored) {}
         }
-        // Formato 2: _yyyyMMdd (8 dígitos após o underscore)
         Matcher m2 = PATTERN_APOS_UNDERSCORE.matcher(nome);
         if (m2.find()) {
-            try {
-                return Optional.of(LocalDate.parse(m2.group(1), FMT_YYYYMMDD));
-            } catch (Exception ignored) {}
+            try { return Optional.of(LocalDate.parse(m2.group(1), FMT_YYYYMMDD)); } catch (Exception ignored) {}
         }
         return Optional.empty();
     }
 
     // ─────────────────────────────────────────────────────────────
-    // AUXILIARES
+    // TIPOS AUXILIARES
     // ─────────────────────────────────────────────────────────────
 
-    private Set<String> listarArquivosLocais(Path dir) {
-        if (!Files.exists(dir)) return new HashSet<>();
-        try (var stream = Files.list(dir)) {
-            return stream
-                    .filter(Files::isRegularFile)
-                    .map(p -> p.getFileName().toString())
-                    .collect(Collectors.toCollection(HashSet::new));
-        } catch (IOException e) {
-            log.warn("[SFTP] Não foi possível listar '{}': {}", dir, e.getMessage());
-            return new HashSet<>();
-        }
+    /**
+     * Callback para o orquestrador receber e processar cada lote.
+     */
+    @FunctionalInterface
+    public interface BatchConsumer {
+        void processar(List<Path> lote, TipoFonte tipoFonte);
     }
 
     /**
-     * Lista recursivamente todos os arquivos dentro de um diretório (incluindo subpastas).
-     * Usado para pré-carregar o cache do /radar na inicialização.
+     * Resumo ao final do ciclo completo.
      */
-    private Set<String> listarArquivosLocaisRecursivo(Path dir) {
-        if (!Files.exists(dir)) return new HashSet<>();
-        try (var stream = Files.walk(dir)) {
-            return stream
-                    .filter(Files::isRegularFile)
-                    .map(p -> p.getFileName().toString())
-                    .collect(Collectors.toCollection(HashSet::new));
-        } catch (IOException e) {
-            log.warn("[SFTP] Não foi possível listar recursivamente '{}': {}", dir, e.getMessage());
-            return new HashSet<>();
-        }
-    }
+    public record DownloadSummary(int recebidos, int radar) {
+        public int total() { return recebidos + radar; }
+        public boolean isEmpty() { return total() == 0; }
 
-    // ─────────────────────────────────────────────────────────────
-    // RESULTADO
-    // ─────────────────────────────────────────────────────────────
-
-    public record DownloadResult(List<Path> recebidos, List<Path> radar) {
-        public boolean isEmpty() {
-            return recebidos.isEmpty() && radar.isEmpty();
+        @Override
+        public String toString() {
+            return String.format("DownloadSummary[recebidos=%d, radar=%d, total=%d]",
+                    recebidos, radar, total());
         }
     }
 }

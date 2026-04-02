@@ -22,9 +22,12 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(Exception.class)
     public ProblemDetail handleGeneric(Exception ex) {
         log.error("[API] Erro interno: ", ex);
+        log.error("[API] Erro interno — classe: {} | mensagem: {}",
+                ex.getClass().getSimpleName(), ex.getMessage(), ex); // ← loga a causa raiz
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(
                 HttpStatus.INTERNAL_SERVER_ERROR, "Erro interno. Contate o suporte.");
         pd.setProperty("timestamp", Instant.now());
+        pd.setProperty("causa", ex.getClass().getSimpleName()); // ← visível na resposta JSON
         return pd;
     }
 }
