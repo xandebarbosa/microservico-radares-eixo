@@ -11,6 +11,7 @@ import com.coruja.services.domain.GestaoRodoviaService;
 import com.coruja.services.radar.RadarsService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -23,17 +24,6 @@ import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-/**
- * Lê arquivos locais, faz parse e persiste.
- *
- * <h3>Mudanças em relação à versão anterior:</h3>
- * <ul>
- *   <li>{@code processar()} agora retorna um {@link ResultadoLote} com contagem de registros
- *       salvos e erros por arquivo — usado pelo orquestrador para atualizar o status no banco.</li>
- *   <li>Cache de localização é reutilizado entre arquivos do mesmo lote (construído UMA vez).</li>
- *   <li>Erros em um arquivo não interrompem o processamento dos demais.</li>
- * </ul>
- */
 @Component
 @Slf4j
 @RequiredArgsConstructor
@@ -45,22 +35,15 @@ public class FileProcessor {
     private final LocalizacaoRadarRepository      localizacaoRepo;
     private final ArquivoSftpProcessadoRepository arquivoRepo;
 
-    // ─────────────────────────────────────────────────────────────
-    // API PÚBLICA
-    // ─────────────────────────────────────────────────────────────
+    // 🟢 LÊ CORRETAMENTE A PASTA DO APPLICATION.PROPERTIES (OU DOCKER)
+    @Value("${sftp.local.directory:/app/radar}")
+    private String localBaseDirectory;
 
-    /**
-     * Processa uma lista de arquivos com o mesmo {@link TipoFonte}.
-     *
-     * @return {@link ResultadoLote} com o número de registros salvos e arquivos com erro.
-     */
     public ResultadoLote processar(List<Path> arquivos, TipoFonte tipoFonte) {
         if (arquivos == null || arquivos.isEmpty()) return ResultadoLote.vazio();
 
-        log.info("[FileProcessor] Processando lote de {} arquivo(s) — fonte: {}",
-                arquivos.size(), tipoFonte);
+        log.info("[FileProcessor] Processando lote de {} arquivo(s) — fonte: {}", arquivos.size(), tipoFonte);
 
-        // Caches construídos UMA vez para todo o lote
         Map<String, LocalizacaoRadar> localCache = carregarLocalCache();
         Map<String, LocalizacaoRadar> pracaCache = carregarPracaCache();
 
@@ -70,8 +53,6 @@ public class FileProcessor {
         for (Path arquivo : arquivos) {
             ResultadoArquivo resultado = processarArquivo(arquivo, tipoFonte, localCache, pracaCache);
             totalRegistros += resultado.registrosSalvos();
-
-            // Atualiza status no banco para PROCESSADO ou ERRO
             atualizarStatusNoBanco(arquivo.getFileName().toString(), resultado);
 
             if (!resultado.sucesso()) {
@@ -84,10 +65,6 @@ public class FileProcessor {
 
         return new ResultadoLote(totalRegistros, arquivos.size() - arquivosComErro, arquivosComErro);
     }
-
-    // ─────────────────────────────────────────────────────────────
-    // PROCESSAMENTO POR ARQUIVO
-    // ─────────────────────────────────────────────────────────────
 
     private ResultadoArquivo processarArquivo(
             Path arquivo,
@@ -125,8 +102,11 @@ public class FileProcessor {
         try {
             long inicio = System.currentTimeMillis();
             radarsService.saveRadars(lote);
-            log.info("[FileProcessor] {} registros salvos em {}ms (arquivo: {}).",
-                    lote.size(), System.currentTimeMillis() - inicio, arquivo.getFileName());
+
+            // 🟢 LOG COM A VARIÁVEL DE TEMPO CORRIGIDA
+            log.info("[FileProcessor] {} registros salvos em {}ms | Rodovias: {} (arquivo: {}).",
+                    lote.size(), System.currentTimeMillis() - inicio, dominios.keySet(), arquivo.getFileName());
+
             return ResultadoArquivo.sucesso(lote.size());
         } catch (Exception e) {
             log.error("[FileProcessor] Falha ao salvar registros de {}: {}", arquivo.getFileName(), e.getMessage());
@@ -134,17 +114,6 @@ public class FileProcessor {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // ATUALIZAÇÃO DE STATUS
-    // ─────────────────────────────────────────────────────────────
-
-    /**
-     * Atualiza o status do arquivo no banco após processamento.
-     *
-     * <p>Visibilidade package-private (não {@code private}) é intencional:
-     * o proxy CGLIB do Spring só intercepta {@code @Transactional} em métodos
-     * não-privados. Método privado seria chamado diretamente, ignorando a transação.
-     */
     @Transactional
     void atualizarStatusNoBanco(String nomeArquivo, ResultadoArquivo resultado) {
         arquivoRepo.findByNomeArquivo(nomeArquivo).ifPresentOrElse(
@@ -168,14 +137,6 @@ public class FileProcessor {
         );
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // RETRY DE ARQUIVOS COM ERRO
-    // ─────────────────────────────────────────────────────────────
-
-    /**
-     * Retenta arquivos com status {@code ERRO} já presentes no disco.
-     * Chamado pelo orquestrador em ciclos separados.
-     */
     public ResultadoLote retentarComErro(List<ArquivoSftpProcessado> elegíveis) {
         if (elegíveis == null || elegíveis.isEmpty()) return ResultadoLote.vazio();
 
@@ -187,17 +148,26 @@ public class FileProcessor {
         int totalRegistros = 0;
         int arquivosComErro = 0;
 
+        Path baseDir = Path.of(localBaseDirectory);
+
+        // 🚀 OTIMIZAÇÃO: Varre todo o disco UMA ÚNICA VEZ e guarda o caminho exato do arquivo
+        Map<String, Path> cacheDisco = new HashMap<>();
+        try (Stream<Path> stream = Files.walk(baseDir)) {
+            stream.filter(Files::isRegularFile)
+                    .forEach(p -> cacheDisco.put(p.getFileName().toString(), p));
+        } catch (IOException e) {
+            log.error("[FileProcessor] Falha ao mapear diretórios locais.", e);
+        }
+
         for (ArquivoSftpProcessado registro : elegíveis) {
-            Path pasta = registro.getTipoFonte() == TipoFonte.RECEBIDOS
-                    ? Path.of(System.getProperty("sftp.local.directory", "."), "recebidos")
-                    : Path.of(System.getProperty("sftp.local.directory", "."), "radar");
 
-            Path arquivo = pasta.resolve(registro.getNomeArquivo());
+            // Busca O(1) instantânea na memória, sem acessar o disco!
+            Path arquivo = cacheDisco.get(registro.getNomeArquivo());
 
-            if (!arquivo.toFile().exists()) {
-                log.warn("[FileProcessor] Arquivo para retry não encontrado no disco: {}", arquivo);
+            if (arquivo == null) {
+                log.warn("[FileProcessor] Arquivo apagado do disco (Ignorando retry): {}", registro.getNomeArquivo());
                 arquivosComErro++;
-                continue;
+                continue; // Deixa para a "Auto-Cura" do SftpDownloader baixar de novo
             }
 
             ResultadoArquivo resultado = processarArquivo(
@@ -211,10 +181,6 @@ public class FileProcessor {
         return new ResultadoLote(totalRegistros, elegíveis.size() - arquivosComErro, arquivosComErro);
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // COLETA DE DOMÍNIOS
-    // ─────────────────────────────────────────────────────────────
-
     private void coletarDominio(Map<String, Set<String>> dominios, Radars radar, TipoFonte tipoFonte) {
         String rodovia = radar.getRodovia();
         if (rodovia == null || rodovia.isBlank()) return;
@@ -225,10 +191,6 @@ public class FileProcessor {
             kms.add(radar.getKm());
         }
     }
-
-    // ─────────────────────────────────────────────────────────────
-    // CACHES DE LOCALIZAÇÃO
-    // ─────────────────────────────────────────────────────────────
 
     private Map<String, LocalizacaoRadar> carregarLocalCache() {
         return localizacaoRepo.findAll().stream()
@@ -248,10 +210,6 @@ public class FileProcessor {
                         (a, b) -> a
                 ));
     }
-
-    // ─────────────────────────────────────────────────────────────
-    // TIPOS AUXILIARES
-    // ─────────────────────────────────────────────────────────────
 
     public record ResultadoArquivo(boolean sucesso, int registrosSalvos, String mensagemErro) {
         static ResultadoArquivo sucesso(int registros) {

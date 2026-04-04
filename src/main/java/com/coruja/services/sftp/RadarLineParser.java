@@ -73,6 +73,12 @@ public class RadarLineParser {
             if (tipoFonte == TipoFonte.RADAR) {
                 rodoviaFinal = extrairRodovia(localizacaoBruta);
                 kmFinal      = extrairKm(localizacaoBruta);
+
+                // LOG PARA ACHAR AS RODOVIAS PERDIDAS
+                if (rodoviaFinal.isBlank()) {
+                    log.warn("[Parser] ALERTA: Regex não conseguiu extrair a rodovia de: '{}'. O formato deve estar diferente do esperado pelo Regex.", localizacaoBruta);
+                }
+
                 localizacao  = localCache.get(chaveCache(rodoviaFinal, kmFinal));
             } else {
                 // RECEBIDOS: a localização pode ser o nome da praça ou a rodovia
@@ -100,7 +106,7 @@ public class RadarLineParser {
             return Optional.of(radar);
 
         } catch (Exception e) {
-            log.trace("[Parser] Linha ignorada (erro: {}): {}", e.getMessage(), linha);
+            log.warn("[Parser] Linha corrompida ignorada (erro: {}): {}", e.getMessage(), linha);
             return Optional.empty();
         }
     }

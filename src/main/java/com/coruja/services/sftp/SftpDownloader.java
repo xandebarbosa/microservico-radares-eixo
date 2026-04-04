@@ -58,7 +58,7 @@ public class SftpDownloader {
     @Value("${sftp.local.directory}")
     private String localBaseDirectory;
 
-    @Value("${sftp.download.limite.dias:1}")
+    @Value("${sftp.download.limite.dias:10}")
     private int limiteDias;
 
     /** Quantos arquivos baixar por lote antes de devolver ao orquestrador para processamento. */
@@ -94,8 +94,7 @@ public class SftpDownloader {
      * @param consumer Callback chamado a cada lote; recebe o lote e o TipoFonte.
      * @return Resumo total de arquivos baixados (somando todos os lotes).
      */
-    public DownloadSummary baixarEmLotes(ChannelSftp sftp, BatchConsumer consumer)
-            throws IOException {
+    public DownloadSummary baixarEmLotes(ChannelSftp sftp, BatchConsumer consumer) throws IOException {
 
         Path localRecebidos = Path.of(localBaseDirectory, "recebidos");
         Path localRadar     = Path.of(localBaseDirectory, "radar");
@@ -165,13 +164,21 @@ public class SftpDownloader {
                 }
 
                 // ── Arquivo folha ────────────────────────────────────────
-                if (jaConhecidos.contains(nome)) {
-                    log.debug("[SFTP] Já conhecido no banco, ignorando: {}", nome);
-                    continue;
-                }
+                Path arquivoLocal = localPath.resolve(nome);
+
+                // 1. FILTRO DE DATA PRIMEIRO (Filtra antes de qualquer outra lógica)
                 if (!isDentroDoPeriodo(nome, dataLimite)) {
-                    log.debug("[SFTP] Arquivo fora do período: {}", nome);
-                    continue;
+                    continue; // Ignora ficheiros antigos silenciosamente
+                }
+
+                // 2. VERIFICAÇÃO DE CACHE E AUTO-CURA
+                if (jaConhecidos.contains(nome)) {
+                    if (!Files.exists(arquivoLocal)) {
+                        log.warn("[SFTP] AUTO-CURA: Ficheiro '{}' sumiu do disco! Forçando re-download.", nome);
+                    } else {
+                        // Está no banco, está no disco e está no limite de dias. Ignorar.
+                        continue;
+                    }
                 }
 
                 Optional<Path> baixado = baixarArquivo(sftp, nome, localPath, tipoFonte, jaConhecidos);
@@ -180,9 +187,8 @@ public class SftpDownloader {
                     log.debug("[SFTP] Adicionado ao lote: {} ({}/{})", nome, loteAtual.size(), batchSize);
                 });
 
-                // Quando o lote atinge o tamanho configurado, entrega para processamento
                 if (loteAtual.size() >= batchSize) {
-                    log.info("[SFTP] Lote de {} arquivo(s) pronto para processamento ({}).",
+                    log.info("[SFTP] Lote de {} ficheiro(s) pronto para processamento ({}).",
                             loteAtual.size(), tipoFonte);
                     consumer.processar(new ArrayList<>(loteAtual), tipoFonte);
                     totalBaixados += loteAtual.size();
@@ -190,9 +196,10 @@ public class SftpDownloader {
                 }
             }
         } catch (SftpException e) {
-            log.error("[SFTP] Erro ao varrer '{}': {}", remotePath, e.getMessage());
+            // Usamos e.toString() em vez de getMessage() para evitar mensagens vazias quando a rede falha
+            log.error("[SFTP] Erro ao varrer '{}': {}", remotePath, e.toString());
         } catch (IOException e) {
-            log.error("[SFTP] Erro de I/O em '{}': {}", remotePath, e.getMessage());
+            log.error("[SFTP] Erro de I/O em '{}': {}", remotePath, e.toString());
         }
 
         // Processa o lote residual (último lote, menor que batchSize)
@@ -226,37 +233,43 @@ public class SftpDownloader {
         try (InputStream is = sftp.get(nomeRemoto)) {
             Files.copy(is, alvo, StandardCopyOption.REPLACE_EXISTING);
 
-            // Persiste o registro no banco (status BAIXADO)
-            ArquivoSftpProcessado registro = ArquivoSftpProcessado.builder()
-                    .nomeArquivo(nomeRemoto)
-                    .tipoFonte(tipoFonte)
-                    .status(StatusProcessamento.BAIXADO)
-                    .baixadoEm(LocalDateTime.now())
-                    .tentativas(0)
-                    .build();
+            // 🚀 AUTO-CURA: Tenta encontrar o registro que estava em ERRO.
+            // Se encontrar, faz um UPDATE. Se não encontrar, faz um INSERT (Cria novo).
+            ArquivoSftpProcessado registro = arquivoRepo.findByNomeArquivo(nomeRemoto)
+                    .orElseGet(() -> ArquivoSftpProcessado.builder()
+                            .nomeArquivo(nomeRemoto)
+                            .tipoFonte(tipoFonte)
+                            .build());
+
+            registro.setStatus(StatusProcessamento.BAIXADO);
+            registro.setBaixadoEm(LocalDateTime.now());
+            registro.setTentativas(0); // Zera as tentativas para dar uma nova chance
+            registro.setMensagemErro(null); // Limpa a mensagem de erro antiga do banco
+
             arquivoRepo.save(registro);
 
-            // Atualiza o set in-memory para não tentar baixar novamente no mesmo ciclo
             jaConhecidos.add(nomeRemoto);
 
             log.info("[SFTP] ✅ Baixado e registrado: {}", nomeRemoto);
             return Optional.of(alvo);
 
         } catch (Exception e) {
-            log.error("[SFTP] ❌ Falha ao baixar '{}': {}", nomeRemoto, e.getMessage());
+            log.error("[SFTP] ❌ Falha ao baixar '{}': {}", nomeRemoto, e.toString());
 
-            // Registra a falha no banco para auditoria
             try {
-                ArquivoSftpProcessado falha = ArquivoSftpProcessado.builder()
-                        .nomeArquivo(nomeRemoto)
-                        .tipoFonte(tipoFonte)
-                        .status(StatusProcessamento.ERRO)
-                        .baixadoEm(LocalDateTime.now())
-                        .mensagemErro("Falha no download: " + e.getMessage())
-                        .tentativas(1)
-                        .build();
+                ArquivoSftpProcessado falha = arquivoRepo.findByNomeArquivo(nomeRemoto)
+                        .orElseGet(() -> ArquivoSftpProcessado.builder()
+                                .nomeArquivo(nomeRemoto)
+                                .tipoFonte(tipoFonte)
+                                .build());
+
+                falha.setStatus(StatusProcessamento.ERRO);
+                falha.setBaixadoEm(LocalDateTime.now());
+                falha.setMensagemErro("Falha no download: " + e.getMessage());
+                falha.setTentativas(1);
+
                 arquivoRepo.save(falha);
-                jaConhecidos.add(nomeRemoto); // evita retry infinito no mesmo ciclo
+                jaConhecidos.add(nomeRemoto);
             } catch (Exception ex) {
                 log.warn("[SFTP] Não foi possível registrar falha no banco para '{}': {}", nomeRemoto, ex.getMessage());
             }

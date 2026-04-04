@@ -15,18 +15,25 @@ services:
       - "8086:8086" # Expõe a porta do serviço para a sua máquina
     environment:
       # ATIVA O PERFIL DE PRODUÇÃO, fazendo o Spring usar o application-prod.properties
+      # --- Configurações do Spring ---
       - SPRING_PROFILES_ACTIVE=prod
-      # Você pode sobrescrever outras configs aqui, como as senhas de SFTP
+      # --- Configurações do SFTP e Pastas ---
+      - SFTP_LOCAL_DIRECTORY=/app/radar
+      - SFTP_DOWNLOAD_LIMITE_DIAS=10
       - SFTP_HOST=${EIXO_SFTP_HOST}
       - SFTP_PORT=${EIXO_SFTP_PORT}
       - SFTP_USER=${EIXO_SFTP_USER}
       - SFTP_PASS=${EIXO_SFTP_PASS}
+      # --- Banco de Dados ---
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      # --- Mensageria (RabbitMQ) ---
       - RABBITMQ_USER=${RABBITMQ_USER}
       - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
-      - rabbitmq.exchange.name=radares_exchange
-      - rabbitmq.routing.key=radares.eixo
+      - RABBITMQ_EXCHANGE_NAME=radares_exchange
+      - RABBITMQ_ROUTING_KEY=radares.eixo
+    volumes:
+      - "D:/Radares/Eixo:/app/radar"
     networks:
       - radares-net
     restart: on-failure
