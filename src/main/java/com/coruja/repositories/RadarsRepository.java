@@ -37,21 +37,14 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
     Page<Radars> findAllByPlaca(@Param("placa") String placa, Pageable pageable);
 
     /**
-     * ✅ BUSCA COM FILTROS COMBINADOS - CORRIGIDA
-     * Melhorias:
-     * 1. Normalização com TRIM, UPPER e unaccent para rodovia e sentido
-     * 2. TRIM no km para evitar problemas com espaços
-     * 3. Uso de ILIKE com pattern matching para rodovia (mais flexível)
-     * 4. Comparação exata (=) para sentido após normalização
+     * ✅ BUSCA COM FILTROS COMBINADOS - ALTA PERFORMANCE
      */
     @Query(value = """
     SELECT DISTINCT ON (r.data, r.hora, r.placa) r.* FROM radars_eixo r
     WHERE 1=1
-    AND (CAST(:rodovia AS TEXT) IS NULL
-         OR TRIM(UPPER(unaccent(r.rodovia))) ILIKE CONCAT('%', TRIM(UPPER(unaccent(CAST(:rodovia AS TEXT)))), '%'))
-    AND (CAST(:km AS TEXT) IS NULL OR CAST(:km AS TEXT) = '' OR TRIM(r.km) = TRIM(CAST(:km AS TEXT)))
-    AND (CAST(:sentido AS TEXT) IS NULL
-         OR TRIM(UPPER(unaccent(r.sentido))) = TRIM(UPPER(unaccent(CAST(:sentido AS TEXT)))))
+    AND (CAST(:rodovia AS TEXT) IS NULL OR r.rodovia ILIKE CONCAT('%', CAST(:rodovia AS TEXT), '%'))
+    AND (CAST(:km AS TEXT) IS NULL OR CAST(:km AS TEXT) = '' OR r.km = CAST(:km AS TEXT))
+    AND (CAST(:sentido AS TEXT) IS NULL OR r.sentido = CAST(:sentido AS TEXT))
     AND (CAST(:data AS DATE) IS NULL OR r.data = CAST(:data AS DATE))
     AND (CAST(:horaInicial AS TIME) IS NULL OR r.hora >= CAST(:horaInicial AS TIME))
     AND (CAST(:horaFinal AS TIME) IS NULL OR r.hora <= CAST(:horaFinal AS TIME))
@@ -72,19 +65,7 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
 
     /**
      * ✅ BUSCA GEOESPACIAL OTIMIZADA
-     * Busca passagens de radar que ocorreram dentro de um raio específico
-     * a partir de um ponto de coordenadas, em um determinado intervalo de tempo.
-     * Utiliza uma consulta SQL nativa para aproveitar as funções do PostGIS.
-     *
-     * @param latitude A latitude do ponto de busca.
-     * @param longitude A longitude do ponto de busca.
-     * @param raioEmMetros O raio da busca em metros (ex: 500.0 para 500 metros).
-     * @param data A data da pesquisa.
-     * @param horaInicial A hora inicial do intervalo de pesquisa.
-     * @param horaFinal A hora final do intervalo de pesquisa.
-     * @param pageable Objeto de paginação.
-     * @return Uma página de registros de radar encontrados.
-     * */
+     */
     @Query(value = """
         SELECT DISTINCT ON (r.data, r.hora, r.placa) r.* FROM radars_eixo r
         INNER JOIN localizacao_radar l ON r.localizacao_id = l.id
@@ -162,10 +143,8 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
         SELECT DISTINCT ON (r.data, r.hora, r.placa) r.*
         FROM radars_eixo r
         WHERE r.tipo_fonte = 'RECEBIDOS'
-        AND (CAST(:rodovia AS TEXT) IS NULL
-             OR TRIM(UPPER(unaccent(r.rodovia))) ILIKE CONCAT('%', TRIM(UPPER(unaccent(CAST(:rodovia AS TEXT)))), '%'))
-        AND (CAST(:sentido AS TEXT) IS NULL
-             OR TRIM(UPPER(unaccent(r.sentido))) = TRIM(UPPER(unaccent(CAST(:sentido AS TEXT)))))
+        AND (CAST(:rodovia AS TEXT) IS NULL OR r.rodovia ILIKE CONCAT('%', CAST(:rodovia AS TEXT), '%'))
+        AND (CAST(:sentido AS TEXT) IS NULL OR r.sentido = CAST(:sentido AS TEXT))
         AND (CAST(:data AS DATE) IS NULL OR r.data = CAST(:data AS DATE))
         AND (CAST(:horaInicial AS TIME) IS NULL OR r.hora >= CAST(:horaInicial AS TIME))
         AND (CAST(:horaFinal   AS TIME) IS NULL OR r.hora <= CAST(:horaFinal   AS TIME))
@@ -194,11 +173,9 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
         SELECT DISTINCT ON (r.data, r.hora, r.placa) r.*
         FROM radars_eixo r
         WHERE r.tipo_fonte = 'RADAR'
-        AND (CAST(:rodovia AS TEXT) IS NULL
-             OR TRIM(UPPER(unaccent(r.rodovia))) ILIKE CONCAT('%', TRIM(UPPER(unaccent(CAST(:rodovia AS TEXT)))), '%'))
-        AND (CAST(:km AS TEXT) IS NULL OR TRIM(r.km) = TRIM(CAST(:km AS TEXT)))
-        AND (CAST(:sentido AS TEXT) IS NULL
-             OR TRIM(UPPER(unaccent(r.sentido))) = TRIM(UPPER(unaccent(CAST(:sentido AS TEXT)))))
+        AND (CAST(:rodovia AS TEXT) IS NULL OR r.rodovia ILIKE CONCAT('%', CAST(:rodovia AS TEXT), '%'))
+        AND (CAST(:km AS TEXT) IS NULL OR r.km = CAST(:km AS TEXT))
+        AND (CAST(:sentido AS TEXT) IS NULL OR r.sentido = CAST(:sentido AS TEXT))
         AND (CAST(:data AS DATE) IS NULL OR r.data = CAST(:data AS DATE))
         AND (CAST(:horaInicial AS TIME) IS NULL OR r.hora >= CAST(:horaInicial AS TIME))
         AND (CAST(:horaFinal   AS TIME) IS NULL OR r.hora <= CAST(:horaFinal   AS TIME))

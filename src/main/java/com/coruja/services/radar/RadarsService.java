@@ -207,6 +207,7 @@ public class RadarsService {
                 .km(r.getKm())
                 .sentido(Sentido.fromString(r.getSentido()))
                 .tipoFonte(r.getTipoFonte())
+                .concessionaria("Eixo")
                 .build();
     }
 

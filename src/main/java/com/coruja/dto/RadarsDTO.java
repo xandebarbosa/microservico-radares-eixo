@@ -22,6 +22,7 @@ public class RadarsDTO {
     private String rodovia;
     private String km;
     private Sentido sentido;
+    private String concessionaria;
 
     /**
      * Origem do dado: RECEBIDOS (sem KM) ou RADAR (com KM).
