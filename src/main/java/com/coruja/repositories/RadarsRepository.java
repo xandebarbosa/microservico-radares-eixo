@@ -44,7 +44,7 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
     WHERE 1=1
     AND (CAST(:rodovia AS TEXT) IS NULL OR r.rodovia ILIKE CONCAT('%', CAST(:rodovia AS TEXT), '%'))
     AND (CAST(:km AS TEXT) IS NULL OR CAST(:km AS TEXT) = '' OR r.km = CAST(:km AS TEXT))
-    AND (CAST(:sentido AS TEXT) IS NULL OR r.sentido = CAST(:sentido AS TEXT))
+    AND (CAST(:sentido AS TEXT) IS NULL OR r.sentido ILIKE CAST(:sentido AS TEXT))
     AND (CAST(:data AS DATE) IS NULL OR r.data = CAST(:data AS DATE))
     AND (CAST(:horaInicial AS TIME) IS NULL OR r.hora >= CAST(:horaInicial AS TIME))
     AND (CAST(:horaFinal AS TIME) IS NULL OR r.hora <= CAST(:horaFinal AS TIME))
@@ -144,7 +144,7 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
         FROM radars_eixo r
         WHERE r.tipo_fonte = 'RECEBIDOS'
         AND (CAST(:rodovia AS TEXT) IS NULL OR r.rodovia ILIKE CONCAT('%', CAST(:rodovia AS TEXT), '%'))
-        AND (CAST(:sentido AS TEXT) IS NULL OR r.sentido = CAST(:sentido AS TEXT))
+        AND (CAST(:sentido AS TEXT) IS NULL OR r.sentido ILIKE CAST(:sentido AS TEXT))
         AND (CAST(:data AS DATE) IS NULL OR r.data = CAST(:data AS DATE))
         AND (CAST(:horaInicial AS TIME) IS NULL OR r.hora >= CAST(:horaInicial AS TIME))
         AND (CAST(:horaFinal   AS TIME) IS NULL OR r.hora <= CAST(:horaFinal   AS TIME))
@@ -175,7 +175,7 @@ public interface RadarsRepository  extends JpaRepository<Radars, Long>, JpaSpeci
         WHERE r.tipo_fonte = 'RADAR'
         AND (CAST(:rodovia AS TEXT) IS NULL OR r.rodovia ILIKE CONCAT('%', CAST(:rodovia AS TEXT), '%'))
         AND (CAST(:km AS TEXT) IS NULL OR r.km = CAST(:km AS TEXT))
-        AND (CAST(:sentido AS TEXT) IS NULL OR r.sentido = CAST(:sentido AS TEXT))
+        AND (CAST(:sentido AS TEXT) IS NULL OR r.sentido ILIKE CAST(:sentido AS TEXT))
         AND (CAST(:data AS DATE) IS NULL OR r.data = CAST(:data AS DATE))
         AND (CAST(:horaInicial AS TIME) IS NULL OR r.hora >= CAST(:horaInicial AS TIME))
         AND (CAST(:horaFinal   AS TIME) IS NULL OR r.hora <= CAST(:horaFinal   AS TIME))

@@ -85,16 +85,25 @@ public class RadarsService {
         log.info("[Eixo] buscarPorLocal | data={} | rodovia='{}' | km='{}' | sentido='{}'",
                 req.getData(), req.getRodovia(), req.getKm(), req.getSentido());
 
-        // Usamos a query unificada que procura em TUDO (Radar e Recebidos)
-        Page<Radars> page = radarsRepository.findByLocalFilter(
-                req.getData(),
-                req.getHoraInicial(),
-                req.getHoraFinal(),
-                normalize(req.getRodovia()),
-                normalize(req.getKm()),
-                normalize(req.getSentido()),
-                pageable
-        );
+        // Normalização garantida antes de ir para o repositório
+        String rodoviaNorm = normalize(req.getRodovia());
+        String kmNorm = normalize(req.getKm());
+        String sentidoNorm = normalize(req.getSentido());
+
+        Page<Radars> page;
+
+        // Roteamento OTIMIZADO para bater na partição/índice correto do PostgreSQL
+        if (req.getTipoFonte() == TipoFonte.RECEBIDOS) {
+            page = radarsRepository.findByLocalFilterRecebidos(
+                    req.getData(), req.getHoraInicial(), req.getHoraFinal(),
+                    rodoviaNorm, sentidoNorm, pageable
+            );
+        } else {
+            page = radarsRepository.findByLocalFilterRadar(
+                    req.getData(), req.getHoraInicial(), req.getHoraFinal(),
+                    rodoviaNorm, kmNorm, sentidoNorm, pageable
+            );
+        }
 
         log.info("[Eixo] Resultado: {} registros (página {})", page.getTotalElements(), page.getNumber());
         return toPageDTO(page);

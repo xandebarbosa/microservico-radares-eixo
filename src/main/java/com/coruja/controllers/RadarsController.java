@@ -16,10 +16,13 @@ import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.List;
 import java.util.stream.Collectors;
+
+import static java.net.URLDecoder.decode;
 
 @RestController
 @RequestMapping("/radares")
@@ -56,6 +59,11 @@ public class RadarsController {
             @RequestParam(required = false) String sentido,
             @PageableDefault(size = 20, sort = {"data", "hora"}, direction = Sort.Direction.DESC) Pageable pageable) {
 
+        // 1. Limpa lixo do Front ("null", "undefined", espaços vazios)
+        km = limparParametro(km);
+        rodovia = limparParametro(rodovia);
+        sentido = limparParametro(sentido);
+
         // Limpa qualquer lixo de duplo encoding que o BFF possa ter enviado
         // e garante que o espaço (criado pelo Tomcat) volta a ser o sinal de +
         if (km != null) {
@@ -68,23 +76,17 @@ public class RadarsController {
         if (rodovia != null) {
             try {
                 // Decodifica uma vez para resolver o %20 que o Tomcat não decodificou
-                rodovia = java.net.URLDecoder.decode(rodovia, java.nio.charset.StandardCharsets.UTF_8);
+                rodovia = decode(rodovia, StandardCharsets.UTF_8);
             } catch (Exception e) {
                 log.warn("[Eixo] Erro ao decodificar rodovia '{}': {}", rodovia, e.getMessage());
             }
         }
 
-        boolean temKm = km != null && !km.isBlank();
+        boolean temKm = km != null;
         TipoFonte tipoFonte = temKm ? TipoFonte.RADAR : TipoFonte.RECEBIDOS;
 
         log.info("[Eixo] busca-local | tipoFonte={} | data={} | rodovia='{}' | km='{}' | sentido='{}'",
                 tipoFonte, data, rodovia, km, sentido);
-
-        // LOG DIAGNÓSTICO — remover após confirmar
-        log.info("[Eixo][DIAG] rodovia raw='{}' | km raw='{}' | tipoFonte={}",
-                rodovia, km, tipoFonte);
-        log.info("[Eixo][DIAG] rodovia normalizada='{}'",
-                rodovia != null ? java.net.URLDecoder.decode(rodovia, java.nio.charset.StandardCharsets.UTF_8).trim().toUpperCase() : "null");
 
         BuscaLocalRequest req = BuscaLocalRequest.builder()
                 .data(data)
@@ -96,6 +98,7 @@ public class RadarsController {
                 .tipoFonte(tipoFonte) // ← estava faltando: sem isso o switch no RadarsService lança NullPointerException
                 .build();
 
+        log.info("Retorno da busca por Local: {}", req);
         return ResponseEntity.ok(radarsService.buscarPorLocal(req, pageable));
     }
 
@@ -229,5 +232,14 @@ public class RadarsController {
         km.setRodovia(rodovia);
         KmRodovia salvo = gestaoRodoviaService.salvarKm(km);
         return ResponseEntity.ok(new KmRodoviaDTO(salvo.getId(), salvo.getValor(), salvo.getRodovia().getId()));
+    }
+
+    // Adicione este método no final da classe RadarsController:
+    private String limparParametro(String param) {
+        if (param == null || param.isBlank() ||
+                param.equalsIgnoreCase("null") || param.equalsIgnoreCase("undefined")) {
+            return null;
+        }
+        return param.trim();
     }
 }
