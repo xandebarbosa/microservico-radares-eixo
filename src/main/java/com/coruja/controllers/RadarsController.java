@@ -187,7 +187,7 @@ public class RadarsController {
     // ─────────────────────────────────────────────────────────────
 
     @GetMapping("/all-locations")
-    public ResponseEntity<List<LocalizacaoRadarProjection>> getRadarLocations() {
+    public ResponseEntity<List<LocalizacaoRadarDTO>> getRadarLocations() {
         return ResponseEntity.ok(radarsService.listarTodasLocalizacoes());
     }
 

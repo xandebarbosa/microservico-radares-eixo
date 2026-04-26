@@ -137,8 +137,21 @@ public class RadarsService {
 
     @Cacheable(value = "mapa-radares-eixo", unless = "#result == null || #result.isEmpty()")
     @Transactional(readOnly = true)
-    public List<LocalizacaoRadarProjection> listarTodasLocalizacoes() {
-        return localizacaoRadarRepository.findAllLocations();
+    public List<LocalizacaoRadarDTO> listarTodasLocalizacoes() {
+        // Busca as projeções (Proxies) do banco
+        List<LocalizacaoRadarProjection> projections = localizacaoRadarRepository.findAllLocations();
+
+        // Converte para DTOs concretos para que o Redis/Jackson consigam serializar e desserializar
+        return projections.stream()
+                .map(p -> LocalizacaoRadarDTO.builder()
+                        .id(p.getId())
+                        .concessionaria(p.getConcessionaria())
+                        .rodovia(p.getRodovia())
+                        .km(p.getKm())
+                        .latitude(p.getLatitude())
+                        .longitude(p.getLongitude())
+                        .build())
+                .collect(Collectors.toList());
     }
 
     // ─────────────────────────────────────────────────────────────
