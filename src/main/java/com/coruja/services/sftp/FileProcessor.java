@@ -20,7 +20,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -38,6 +40,11 @@ public class FileProcessor {
     // 🟢 LÊ CORRETAMENTE A PASTA DO APPLICATION.PROPERTIES (OU DOCKER)
     @Value("${sftp.local.directory:/app/radar}")
     private String localBaseDirectory;
+
+    // Padrões estáticos pré-compilados para máxima performance
+    private static final Pattern LINE_PATTERN = Pattern.compile(
+            "^(\\S+)\\s+(\\S+)\\s+(\\S+)\\s+(.+?)\\s+(SP\\S+)\\s+(KM\\S+)$"
+    );
 
     public ResultadoLote processar(List<Path> arquivos, TipoFonte tipoFonte) {
         if (arquivos == null || arquivos.isEmpty()) return ResultadoLote.vazio();
@@ -77,7 +84,7 @@ public class FileProcessor {
         Map<String, Set<String>> dominios = new HashMap<>();
         List<Radars> lote = new ArrayList<>();
 
-        try (Stream<String> linhas = Files.lines(arquivo, StandardCharsets.UTF_8)) {
+        try (Stream<String> linhas = Files.lines(arquivo, StandardCharsets.ISO_8859_1)) {
             linhas.forEach(linha ->
                     parser.parseLine(linha, tipoFonte, localCache, pracaCache)
                             .ifPresent(radar -> {

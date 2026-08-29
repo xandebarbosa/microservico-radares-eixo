@@ -16,7 +16,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -90,20 +92,14 @@ public class RadarsService {
         String kmNorm = normalize(req.getKm());
         String sentidoNorm = normalize(req.getSentido());
 
-        Page<Radars> page;
-
-        // Roteamento OTIMIZADO para bater na partição/índice correto do PostgreSQL
-        if (req.getTipoFonte() == TipoFonte.RECEBIDOS) {
-            page = radarsRepository.findByLocalFilterRecebidos(
-                    req.getData(), req.getHoraInicial(), req.getHoraFinal(),
-                    rodoviaNorm, sentidoNorm, pageable
-            );
-        } else {
-            page = radarsRepository.findByLocalFilterRadar(
-                    req.getData(), req.getHoraInicial(), req.getHoraFinal(),
-                    rodoviaNorm, kmNorm, sentidoNorm, pageable
-            );
-        }
+        // 💡 A MÁGICA: Ao usar o findByLocalFilter (sem restringir a fonte),
+        // o PostgreSQL usará o seu índice V9 (idx_radars_data_hora_placa)
+        // para isolar instantaneamente a partição do dia e devolver os resultados
+        // ignorando parâmetros nulos sem fazer Full Table Scan.
+        Page<Radars> page = radarsRepository.findByLocalFilter(
+                req.getData(), req.getHoraInicial(), req.getHoraFinal(),
+                rodoviaNorm, kmNorm, sentidoNorm, pageable
+        );
 
         log.info("[Eixo] Resultado: {} registros (página {})", page.getTotalElements(), page.getNumber());
         return toPageDTO(page);
@@ -151,6 +147,18 @@ public class RadarsService {
                         .latitude(p.getLatitude())
                         .longitude(p.getLongitude())
                         .build())
+                .collect(Collectors.toList());
+    }
+
+    public List<RadarsDTO> buscarUltimos(int limite) {
+        // Ordena para pegar as passagens mais recentes
+        Pageable pageable = PageRequest.of(0, limite,
+                Sort.by(Sort.Direction.DESC, "data", "hora"));
+
+        Page<Radars> pagina = radarsRepository.findAll(pageable);
+
+        return pagina.getContent().stream()
+                .map(this::toDTO)
                 .collect(Collectors.toList());
     }
 

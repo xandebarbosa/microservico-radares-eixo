@@ -97,17 +97,17 @@ public class SftpOrchestrator {
      */
     @Scheduled(fixedRateString = "${sftp.retry.rate.ms:1800000}")
     public void executarRetry() {
-        List<ArquivoSftpProcessado> elegíveis = downloader.listarElegiveisParaRetry();
+        List<ArquivoSftpProcessado> elegiveis = downloader.listarElegiveisParaRetry();
 
-        if (elegíveis.isEmpty()) {
+        if (elegiveis.isEmpty()) {
             log.debug("[SFTP-Retry] Nenhum arquivo elegível para retry.");
             return;
         }
 
-        log.info("[SFTP-Retry] Iniciando retry de {} arquivo(s) com erro.", elegíveis.size());
+        log.info("[SFTP-Retry] Iniciando retry de {} arquivo(s) com erro.", elegiveis.size());
         long inicio = System.currentTimeMillis();
 
-        FileProcessor.ResultadoLote resultado = fileProcessor.retentarComErro(elegíveis);
+        FileProcessor.ResultadoLote resultado = fileProcessor.retentarComErro(elegiveis);
 
         log.info("[SFTP-Retry] Concluído em {}ms — {} registros | {} ok | {} erro.",
                 System.currentTimeMillis() - inicio,

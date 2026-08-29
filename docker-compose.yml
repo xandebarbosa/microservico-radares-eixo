@@ -18,13 +18,14 @@ services:
       # --- Configurações do Spring ---
       - SPRING_PROFILES_ACTIVE=prod
       # --- Configurações do SFTP e Pastas ---
-      - SFTP_LOCAL_DIRECTORY=/app/radar
-      - SFTP_DOWNLOAD_LIMITE_DIAS=10
+      - SFTP_LOCAL_DIRECTORY=/app/downloads
+      - SFTP_DOWNLOAD_LIMITE_DIAS=30
       - SFTP_HOST=${EIXO_SFTP_HOST}
       - SFTP_PORT=${EIXO_SFTP_PORT}
       - SFTP_USER=${EIXO_SFTP_USER}
       - SFTP_PASS=${EIXO_SFTP_PASS}
       # --- Banco de Dados ---
+      # - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres-db:5432/eixo_db
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       # --- Mensageria (RabbitMQ) ---
@@ -32,11 +33,14 @@ services:
       - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
       - RABBITMQ_EXCHANGE_NAME=radares_exchange
       - RABBITMQ_ROUTING_KEY=radares.eixo
+      # --- Integração com Config Server e Eureka (Adicione se o seu projeto usar) ---
+      #- SPRING_CONFIG_IMPORT=configserver:http://config-server:8888
+      #- EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
     volumes:
-      - "D:/Radares/Eixo:/app/radar"
+      - "/mnt/data/docker-volumes/radares_project/downloads/Eixo:/app/downloads"
     networks:
       - radares-net
-    restart: on-failure
+    restart: unless-stopped
 volumes:
   postgres-eixo-data:
   pgadmin-data: # <-- Adicionar o novo volume aqui

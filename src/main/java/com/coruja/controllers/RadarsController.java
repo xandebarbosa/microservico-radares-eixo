@@ -59,7 +59,7 @@ public class RadarsController {
             @RequestParam(required = false) String sentido,
             @PageableDefault(size = 20, sort = {"data", "hora"}, direction = Sort.Direction.DESC) Pageable pageable) {
 
-        // 1. Limpa lixo do Front ("null", "undefined", espaços vazios)
+        // 💡 Limpeza cega e segura contra lixo do Front-End
         km = limparParametro(km);
         rodovia = limparParametro(rodovia);
         sentido = limparParametro(sentido);
@@ -82,20 +82,20 @@ public class RadarsController {
             }
         }
 
-        boolean temKm = km != null;
-        TipoFonte tipoFonte = temKm ? TipoFonte.RADAR : TipoFonte.RECEBIDOS;
+        //boolean temKm = km != null;
+        //TipoFonte tipoFonte = temKm ? TipoFonte.RADAR : TipoFonte.RECEBIDOS;
 
-        log.info("[Eixo] busca-local | tipoFonte={} | data={} | rodovia='{}' | km='{}' | sentido='{}'",
-                tipoFonte, data, rodovia, km, sentido);
+        log.info("[Eixo] busca-local unificada | data={} | rodovia='{}' | km='{}' | sentido='{}'",
+                data, rodovia, km, sentido);
 
+        // 💡 Já não forçamos o TipoFonte. Queremos que a base de dados procure em TODAS as fontes.
         BuscaLocalRequest req = BuscaLocalRequest.builder()
                 .data(data)
                 .horaInicial(horaInicial)
                 .horaFinal(horaFinal)
                 .rodovia(rodovia)
-                .km(temKm ? km : null)
+                .km(km)
                 .sentido(sentido)
-                .tipoFonte(tipoFonte) // ← estava faltando: sem isso o switch no RadarsService lança NullPointerException
                 .build();
 
         log.info("Retorno da busca por Local: {}", req);
@@ -197,11 +197,17 @@ public class RadarsController {
 
     @GetMapping("/rodovias")
     public ResponseEntity<List<RodoviaDTO>> listarRodovias() {
-        return ResponseEntity.ok(
-                gestaoRodoviaService.listarRodovias().stream()
-                        .map(r -> RodoviaDTO.builder().id(r.getId()).nome(r.getNome()).build())
-                        .collect(Collectors.toList())
-        );
+        log.info("[Eixo] listarRodovias");
+
+        List<Rodovia> rodovias = gestaoRodoviaService.listarRodovias();
+
+        //Converte entidades para DTOs
+        List<RodoviaDTO> rodoviaDTOS = rodovias.stream()
+                .map(this::convertToRodoviaDTO)
+                .collect(Collectors.toList());
+
+        log.info("✅ [Eixo] Retornando {} rodovias", rodoviaDTOS.size());
+        return ResponseEntity.ok(rodoviaDTOS);
     }
 
     @PostMapping("/rodovias")
@@ -234,12 +240,31 @@ public class RadarsController {
         return ResponseEntity.ok(new KmRodoviaDTO(salvo.getId(), salvo.getValor(), salvo.getRodovia().getId()));
     }
 
-    // Adicione este método no final da classe RadarsController:
+    // 💡 Método auxiliar corrigido para barrar o N/I
     private String limparParametro(String param) {
         if (param == null || param.isBlank() ||
-                param.equalsIgnoreCase("null") || param.equalsIgnoreCase("undefined")) {
+                param.equalsIgnoreCase("null") ||
+                param.equalsIgnoreCase("undefined") ||
+                param.equalsIgnoreCase("N/I") ||     // Barra o envio limpo
+                param.equalsIgnoreCase("N%2FI") ||   // Barra o envio com encode
+                param.equalsIgnoreCase("N/A")) {
             return null;
         }
         return param.trim();
+    }
+    @GetMapping("/ultimos")
+    public ResponseEntity<List<RadarsDTO>> buscarUltimos(@RequestParam(defaultValue = "10") int limite) {
+        List<RadarsDTO> ultimosRadares = radarsService.buscarUltimos(limite);
+        return ResponseEntity.ok(ultimosRadares);
+    }
+
+    /**
+     * Converte entidade Rodovia para DTO
+     */
+    private RodoviaDTO convertToRodoviaDTO(Rodovia rodovia) {
+        return RodoviaDTO.builder()
+                .id(rodovia.getId())
+                .nome(rodovia.getNome())
+                .build();
     }
 }

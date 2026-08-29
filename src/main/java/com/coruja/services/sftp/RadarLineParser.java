@@ -9,6 +9,7 @@ import org.springframework.stereotype.Component;
 import java.text.Normalizer;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Matcher;
@@ -31,6 +32,22 @@ public class RadarLineParser {
     private static final Pattern PATTERN_KM        = Pattern.compile("km[:\\s]*(\\d+)",    Pattern.CASE_INSENSITIVE);
     private static final Pattern PATTERN_METROS    = Pattern.compile("metros[:\\s]*(\\d+)", Pattern.CASE_INSENSITIVE);
 
+    private static final Pattern PLACA_MERCOSUL_PATTERN = Pattern.compile(
+            "^(" +
+                    "[A-Z]{3}[0-9]{4}|" +          // BR Antigo / UY Mercosul
+                    "[A-Z]{3}[0-9][A-Z][0-9]{2}|" + // BR Carro Mercosul
+                    "[A-Z]{3}[0-9]{2}[A-Z][0-9]|" + // BR Moto Mercosul
+                    "[A-Z]{2}[0-9]{3}[A-Z]{2}|" +   // AR Carro Mercosul
+                    "[A-Z][0-9]{3}[A-Z]{3}|" +      // AR Moto Mercosul
+                    "[A-Z]{3}[0-9]{3}|" +           // AR Antigo (6 caracteres)
+                    "[A-Z]{4}[0-9]{3}|" +           // PY Carro Mercosul (ex: AAGY936)
+                    "[0-9]{3}[A-Z]{4}" +            // PY Moto Mercosul
+                    ")$"
+    );
+
+    private static final Pattern DIACRITICS_PATTERN = Pattern.compile("\\p{InCombiningDiacriticalMarks}+");
+    private static final DateTimeFormatter DATE_FORMATTER_BR = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+
     /**
      * Faz o parse de uma linha CSV.
      *
@@ -46,26 +63,85 @@ public class RadarLineParser {
             Map<String, LocalizacaoRadar> localCache,
             Map<String, LocalizacaoRadar> pracaCache) {
 
-        String[] campos = linha.split(";", -1);
-        if (campos.length < 4) return Optional.empty();
+        if (linha == null || linha.isBlank()) {
+            return Optional.empty();
+        }
 
         try {
-            String dataHoraStr       = campos[0].trim();
-            String placa             = normalizarPlaca(campos[1].trim());
-            String localizacaoBruta  = campos[2].trim();
-            String sentido           = campos[3].trim().replaceAll("\\s+", " ");
+            // Quebra por ponto e vírgula OU tabulação
+            String[] campos = linha.split("[;\t]", -1);
 
-            if (placa.length() < 7 && !placa.equals("N/I")) return Optional.empty();
+            String dataStr;
+            String horaStr;
+            String placaBruta;
+            String localizacaoBruta;
+            String sentidoBruto;
 
-            String[] dhParts = dataHoraStr.split("[T\\s]+");
-            if (dhParts.length < 2) return Optional.empty();
+            // Verifica se a data e a hora vieram separadas em colunas distintas (formato legado/tabulado)
+            if (campos[0].length() <= 10 && campos.length >= 5 && campos[1].contains(":")) {
+                dataStr          = campos[0].trim();
+                horaStr          = campos[1].trim();
+                placaBruta       = campos[2].trim();
+                localizacaoBruta = campos[3].trim();
+                sentidoBruto     = campos[4].trim();
+            }
+            // Senão, é o formato EIXOSP novo (onde Data e Hora estão sempre juntas na coluna 0)
+            else {
+                if (campos.length < 4) return Optional.empty(); // O mínimo são 4 colunas (Recebidos)
 
-            LocalDate data = dhParts[0].contains("/")
-                    ? LocalDate.parse(dhParts[0], java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"))
-                    : LocalDate.parse(dhParts[0]);
+                String dataHoraBruta = campos[0].trim();
 
-            LocalTime hora = LocalTime.parse(dhParts[1].replace("-", ":").split("\\.")[0]);
+                if (dataHoraBruta.contains("T")) {
+                    // Formato RADAR: "2026-08-28T07-50-05"
+                    String[] dhParts = dataHoraBruta.split("T");
+                    dataStr = dhParts[0];
+                    horaStr = dhParts[1].replace("-", ":");
+                } else {
+                    // Formato RECEBIDOS: "2026-08-28 17:09:35.000"
+                    String[] dhParts = dataHoraBruta.split("\\s+");
+                    dataStr = dhParts[0];
+                    horaStr = dhParts[1];
+                }
 
+                placaBruta       = campos[1].trim();
+                localizacaoBruta = campos[2].trim();
+                sentidoBruto     = campos[3].trim();
+            }
+
+            // Normaliza a placa
+            String placa = normalizarPlaca(placaBruta);
+
+            // Remove múltiplos espaços e caracteres indesejados como setas (↑)
+            String sentido = sentidoBruto.replaceAll("\\s+", " ").replace("↑", "").trim();
+
+            // Converte as siglas para o nome completo (N -> Norte, L -> Leste, etc)
+            if (sentido.length() == 1) {
+                switch (sentido.toUpperCase()) {
+                    case "N": sentido = "Norte"; break;
+                    case "S": sentido = "Sul"; break;
+                    case "L": sentido = "Leste"; break;
+                    case "O": sentido = "Oeste"; break;
+                }
+            }
+
+            // Validação de formato Mercosul
+            if (!placa.equals("N/I") && !isPlacaValida(placa)) {
+                log.trace("Placa em formato desconhecido descartada: {}", placa);
+                return Optional.empty();
+            }
+
+            // Parse da Data
+            LocalDate data = dataStr.contains("/")
+                    ? LocalDate.parse(dataStr, DATE_FORMATTER_BR)
+                    : LocalDate.parse(dataStr);
+
+            // Parse e limpeza da Hora (remove os milissegundos ".000" se existirem)
+            if (horaStr.contains(".")) {
+                horaStr = horaStr.split("\\.")[0];
+            }
+            LocalTime hora = LocalTime.parse(horaStr);
+
+            // Extração de Localização baseada na Fonte
             String rodoviaFinal;
             String kmFinal;
             LocalizacaoRadar localizacao;
@@ -74,24 +150,24 @@ public class RadarLineParser {
                 rodoviaFinal = extrairRodovia(localizacaoBruta);
                 kmFinal      = extrairKm(localizacaoBruta);
 
-                // LOG PARA ACHAR AS RODOVIAS PERDIDAS
                 if (rodoviaFinal.isBlank()) {
-                    log.warn("[Parser] ALERTA: Regex não conseguiu extrair a rodovia de: '{}'. O formato deve estar diferente do esperado pelo Regex.", localizacaoBruta);
+                    log.warn("[Parser] ALERTA: Regex não extraiu a rodovia de: '{}'.", localizacaoBruta);
                 }
-
-                localizacao  = localCache.get(chaveCache(rodoviaFinal, kmFinal));
+                localizacao = localCache.get(chaveCache(rodoviaFinal, kmFinal));
             } else {
-                // RECEBIDOS: a localização pode ser o nome da praça ou a rodovia
+                // Remove a palavra "Principal " e arruma possíveis espaços duplos
+                localizacaoBruta = localizacaoBruta.replace("Principal ", "").replaceAll("\\s+", " ").trim();
+
                 String chave = normalizar(localizacaoBruta);
                 localizacao  = pracaCache.get(chave);
 
-                // SALVA TUDO NA RODOVIA: "P1 - Rio Claro" vai direto para a coluna rodovia
                 rodoviaFinal = localizacaoBruta.length() > 255
                         ? localizacaoBruta.substring(0, 255)
                         : localizacaoBruta;
-                kmFinal = ""; // Sem KM
+                kmFinal = "";
             }
 
+            // Constrói e retorna a entidade
             Radars radar = Radars.builder()
                     .data(data)
                     .hora(hora)
@@ -144,10 +220,18 @@ public class RadarLineParser {
     private String normalizarPlaca(String placa) {
         if (placa == null || placa.isBlank()) return "N/I";
         String limpa = placa.replaceAll("[^a-zA-Z0-9]", "").toUpperCase();
+
+        // Se a string sanitizada ficar vazia (ex: continha apenas traços ou espaços)
+        if (limpa.isBlank()) return "N/I";
+
         if (limpa.length() > 7) {
             log.warn("[Parser] Placa truncada: '{}' → '{}'", placa, limpa.substring(0, 7));
             return limpa.substring(0, 7);
         }
         return limpa;
+    }
+
+    private boolean isPlacaValida(String placa) {
+        return PLACA_MERCOSUL_PATTERN.matcher(placa).matches();
     }
 }
