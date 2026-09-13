@@ -222,7 +222,7 @@ public class SftpDownloader {
      * O status será atualizado pelo orquestrador após o processamento.
      */
     @Transactional
-    private Optional<Path> baixarArquivo(
+    protected Optional<Path> baixarArquivo(
             ChannelSftp sftp,
             String nomeRemoto,
             Path destino,

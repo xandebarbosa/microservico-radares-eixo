@@ -33,6 +33,7 @@ services:
       - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
       - RABBITMQ_EXCHANGE_NAME=radares_exchange
       - RABBITMQ_ROUTING_KEY=radares.eixo
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
       # --- Integração com Config Server e Eureka (Adicione se o seu projeto usar) ---
       #- SPRING_CONFIG_IMPORT=configserver:http://config-server:8888
       #- EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
@@ -41,6 +42,12 @@ services:
     networks:
       - radares-net
     restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8086/actuator/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 volumes:
   postgres-eixo-data:
   pgadmin-data: # <-- Adicionar o novo volume aqui
