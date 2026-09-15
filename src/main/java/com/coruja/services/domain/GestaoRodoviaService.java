@@ -8,6 +8,8 @@ import com.coruja.repositories.RadarsRepository;
 import com.coruja.repositories.RodoviaRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.cache.Cache;
+import org.springframework.cache.CacheManager;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
@@ -25,6 +27,9 @@ public class GestaoRodoviaService {
     private final RodoviaRepository rodoviaRepository;
     private final KmRodoviaRepository kmRodoviaRepository;
 
+    // Injetando CacheManager para invalidação programática condicional
+    private final CacheManager cacheManager;
+
     //Cache Thread-safe
     private final ConcurrentHashMap<String, Rodovia> rodoviaCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, Set<String>> kmCachePorRodovia = new ConcurrentHashMap<>();
@@ -38,7 +43,7 @@ public class GestaoRodoviaService {
      */
     @Cacheable("lista-rodovias")
     public List<Rodovia> listarRodovias() {
-        log.info("[Domínio] Carregando rodovias do banco...");
+        log.info("[Domínio] Carregando rodovias do banco para o Redis...");
         List<Rodovia> lista = rodoviaRepository.findAll();
         lista.forEach(r -> rodoviaCache.putIfAbsent(r.getNome(), r));
         return lista;
@@ -73,7 +78,7 @@ public class GestaoRodoviaService {
         }
         Rodovia salva = rodoviaRepository.save(rodovia);
         rodoviaCache.put(salva.getNome(), salva);
-        log.info("[Domínio] Rodovia cadastrada: {}", salva.getNome());
+        log.info("[Domínio] Rodovia cadastrada manualmente: {}", salva.getNome());
         return salva;
     }
 
@@ -114,11 +119,13 @@ public class GestaoRodoviaService {
      *                    (KMs podem estar vazios para registros RECEBIDOS)
      */
     @Transactional
-    @CacheEvict(value = {"lista-rodovias", "lista-kms"}, allEntries = true)
-    public void registrarDescobertas(Map<String, Set<String>> descobertas) {
-        if (descobertas == null || descobertas.isEmpty()) return;
+    //@CacheEvict(value = {"lista-rodovias", "lista-kms"}, allEntries = true)
+    public boolean registrarDescobertas(Map<String, Set<String>> descobertas) {
+        if (descobertas == null || descobertas.isEmpty()) return false;
 
         log.info("🧠 [Domínio] Aprendizado: {} rodovia(s) descoberta(s).", descobertas.size());
+
+        boolean novosRegistros = false;
 
         // Garante cache atualizado
         if (rodoviaCache.isEmpty()) {
@@ -127,33 +134,53 @@ public class GestaoRodoviaService {
 
         List<KmRodovia> novosKms = new ArrayList<>();
 
-        descobertas.forEach((nomeRodovia, kms) -> {
-            Rodovia rodovia = rodoviaCache.computeIfAbsent(nomeRodovia, nome -> {
-                log.info("[Domínio] Nova rodovia: {}", nome);
-                return rodoviaRepository.save(Rodovia.builder().nome(nome).build());
-            });
+        for (Map.Entry<String, Set<String>> entry : descobertas.entrySet()) {
+            String nomeRodovia = entry.getKey();
+            Set<String> kms = entry.getValue();
 
-            if (kms.isEmpty()) return; // RECEBIDOS não tem KM, nada a registrar
+            // Evita fazer save() dentro de blocos lambdas (computeIfAbsent) para não travar threads
+            Rodovia rodovia = rodoviaCache.get(nomeRodovia);
+            if (rodovia == null) {
+                log.info("[Domínio] Nova rodovia descoberta pelo SFTP: {}", nomeRodovia);
+                rodovia = rodoviaRepository.save(Rodovia.builder().nome(nomeRodovia).build());
+                rodoviaCache.put(nomeRodovia, rodovia);
+                novosRegistros = true;
+            }
 
+            if (kms.isEmpty()) continue;
+
+            // Uso de ConcurrentHashMap.newKeySet() elimina a necessidade de blocos 'synchronized'
             Set<String> kmsExistentes = kmCachePorRodovia.computeIfAbsent(rodovia.getId(), id ->
                     kmRodoviaRepository.findByRodoviaId(id).stream()
                             .map(KmRodovia::getValor)
-                            .collect(Collectors.toCollection(HashSet::new))
+                            .collect(Collectors.toCollection(ConcurrentHashMap::newKeySet))
             );
 
             for (String valorKm : kms) {
-                synchronized (kmsExistentes) {
-                    if (kmsExistentes.add(valorKm)) {
-                        novosKms.add(KmRodovia.builder().valor(valorKm).rodovia(rodovia).build());
-                    }
+                if (kmsExistentes.add(valorKm)) {
+                    novosKms.add(KmRodovia.builder().valor(valorKm).rodovia(rodovia).build());
+                    novosRegistros = true;
                 }
             }
-        });
+        }
 
         if (!novosKms.isEmpty()) {
             kmRodoviaRepository.saveAll(novosKms);
-            log.info("[Domínio] {} novo(s) KM(s) cadastrado(s).", novosKms.size());
+            log.info("[Domínio] {} novo(s) KM(s) cadastrado(s) automaticamente.", novosKms.size());
         }
+
+        // Limpa o Redis APENAS se realmente descobrimos algo novo
+        if (novosRegistros) {
+            limparCachesDeDominioProgramaticamente();
+        }
+
+        return novosRegistros;
+    }
+
+    private void limparCachesDeDominioProgramaticamente() {
+        Optional.ofNullable(cacheManager.getCache("lista-rodovias")).ifPresent(Cache::clear);
+        Optional.ofNullable(cacheManager.getCache("lista-kms")).ifPresent(Cache::clear);
+        log.info("[Domínio] Caches do Redis invalidados devido a novas descobertas.");
     }
 
     // ─────────────────────────────────────────────────────────────

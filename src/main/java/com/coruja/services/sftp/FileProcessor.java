@@ -9,6 +9,7 @@ import com.coruja.repositories.ArquivoSftpProcessadoRepository;
 import com.coruja.repositories.LocalizacaoRadarRepository;
 import com.coruja.services.domain.GestaoRodoviaService;
 import com.coruja.services.radar.RadarsService;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -22,6 +23,7 @@ import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -41,30 +43,54 @@ public class FileProcessor {
     @Value("${sftp.local.directory:/app/radar}")
     private String localBaseDirectory;
 
+    // Cache em memória global: Evita N operações de findAll() bloqueantes a cada lote
+    private final Map<String, LocalizacaoRadar> cacheLocalizacoesGlobais = new ConcurrentHashMap<>();
+    
     // Padrões estáticos pré-compilados para máxima performance
     private static final Pattern LINE_PATTERN = Pattern.compile(
             "^(\\S+)\\s+(\\S+)\\s+(\\S+)\\s+(.+?)\\s+(SP\\S+)\\s+(KM\\S+)$"
     );
+    
+    @PostConstruct
+    public void inicializarCacheGlobais() {
+        carregarLocalCacheParaMemoria();
+    }
+
+    private synchronized void carregarLocalCacheParaMemoria() {
+        cacheLocalizacoesGlobais.clear();
+        localizacaoRepo.findAll().forEach(l ->
+                cacheLocalizacoesGlobais.put(parser.chaveCache(l.getRodovia(), l.getKm()), l)
+        );
+        log.info("[FileProcessor] Cache de Localizações (Rodovias) inicializado com {} registros.", cacheLocalizacoesGlobais.size());
+    }
 
     public ResultadoLote processar(List<Path> arquivos, TipoFonte tipoFonte) {
         if (arquivos == null || arquivos.isEmpty()) return ResultadoLote.vazio();
 
         log.info("[FileProcessor] Processando lote de {} arquivo(s) — fonte: {}", arquivos.size(), tipoFonte);
 
-        Map<String, LocalizacaoRadar> localCache = carregarLocalCache();
-        Map<String, LocalizacaoRadar> pracaCache = carregarPracaCache();
-
         int totalRegistros = 0;
         int arquivosComErro = 0;
+        boolean novosDominiosDescobertos = false;
 
         for (Path arquivo : arquivos) {
-            ResultadoArquivo resultado = processarArquivo(arquivo, tipoFonte, localCache, pracaCache);
+            ResultadoArquivo resultado = processarArquivo(arquivo, tipoFonte);
             totalRegistros += resultado.registrosSalvos();
+
+            if (resultado.novosDominiosRegistrados()) {
+                novosDominiosDescobertos = true;
+            }
+
             atualizarStatusNoBanco(arquivo.getFileName().toString(), resultado);
 
             if (!resultado.sucesso()) {
                 arquivosComErro++;
             }
+        }
+
+        // Se encontrou dados novos, atualiza o cache para os próximos lotes assíncronos
+        if (novosDominiosDescobertos) {
+            carregarLocalCacheParaMemoria();
         }
 
         log.info("[FileProcessor] Lote concluído — {} registro(s), {} arquivo(s) com erro.",
@@ -73,12 +99,7 @@ public class FileProcessor {
         return new ResultadoLote(totalRegistros, arquivos.size() - arquivosComErro, arquivosComErro);
     }
 
-    private ResultadoArquivo processarArquivo(
-            Path arquivo,
-            TipoFonte tipoFonte,
-            Map<String, LocalizacaoRadar> localCache,
-            Map<String, LocalizacaoRadar> pracaCache) {
-
+    private ResultadoArquivo processarArquivo(Path arquivo, TipoFonte tipoFonte) {
         log.info("[FileProcessor] Lendo: {} ({})", arquivo.getFileName(), tipoFonte);
 
         Map<String, Set<String>> dominios = new HashMap<>();
@@ -86,7 +107,7 @@ public class FileProcessor {
 
         try (Stream<String> linhas = Files.lines(arquivo, StandardCharsets.ISO_8859_1)) {
             linhas.forEach(linha ->
-                    parser.parseLine(linha, tipoFonte, localCache, pracaCache)
+                    parser.parseLine(linha, tipoFonte, cacheLocalizacoesGlobais)
                             .ifPresent(radar -> {
                                 lote.add(radar);
                                 coletarDominio(dominios, radar, tipoFonte);
@@ -97,24 +118,28 @@ public class FileProcessor {
             return ResultadoArquivo.erro(e.getMessage());
         }
 
+        boolean teveDominiosRegistrados = false;
         if (!dominios.isEmpty()) {
-            gestaoRodoviaService.registrarDescobertas(dominios);
+            // Só retorna true se o GestaoRodoviaService realmente inseriu algo no banco
+            if (gestaoRodoviaService.registrarDescobertas(dominios)) {
+                teveDominiosRegistrados = true;
+                radarsService.invalidarCacheMapaLocalizacoes(); // <-- Aqui o Front-End é notificado!
+            }
         }
 
         if (lote.isEmpty()) {
             log.warn("[FileProcessor] Nenhum registro parseado em: {}", arquivo.getFileName());
-            return ResultadoArquivo.sucesso(0);
+            return ResultadoArquivo.sucesso(0, teveDominiosRegistrados);
         }
 
         try {
             long inicio = System.currentTimeMillis();
             radarsService.saveRadars(lote);
 
-            // 🟢 LOG COM A VARIÁVEL DE TEMPO CORRIGIDA
             log.info("[FileProcessor] {} registros salvos em {}ms | Rodovias: {} (arquivo: {}).",
                     lote.size(), System.currentTimeMillis() - inicio, dominios.keySet(), arquivo.getFileName());
 
-            return ResultadoArquivo.sucesso(lote.size());
+            return ResultadoArquivo.sucesso(lote.size(), teveDominiosRegistrados);
         } catch (Exception e) {
             log.error("[FileProcessor] Falha ao salvar registros de {}: {}", arquivo.getFileName(), e.getMessage());
             return ResultadoArquivo.erro("Falha ao persistir: " + e.getMessage());
@@ -144,20 +169,16 @@ public class FileProcessor {
         );
     }
 
-    public ResultadoLote retentarComErro(List<ArquivoSftpProcessado> elegíveis) {
-        if (elegíveis == null || elegíveis.isEmpty()) return ResultadoLote.vazio();
+    public ResultadoLote retentarComErro(List<ArquivoSftpProcessado> elegiveis) {
+        if (elegiveis == null || elegiveis.isEmpty()) return ResultadoLote.vazio();
 
-        log.info("[FileProcessor] Retentando {} arquivo(s) com erro.", elegíveis.size());
-
-        Map<String, LocalizacaoRadar> localCache = carregarLocalCache();
-        Map<String, LocalizacaoRadar> pracaCache = carregarPracaCache();
+        log.info("[FileProcessor] Retentando {} arquivo(s) com erro.", elegiveis.size());
 
         int totalRegistros = 0;
         int arquivosComErro = 0;
+        boolean novosDominios = false;
 
         Path baseDir = Path.of(localBaseDirectory);
-
-        // 🚀 OTIMIZAÇÃO: Varre todo o disco UMA ÚNICA VEZ e guarda o caminho exato do arquivo
         Map<String, Path> cacheDisco = new HashMap<>();
         try (Stream<Path> stream = Files.walk(baseDir)) {
             stream.filter(Files::isRegularFile)
@@ -166,26 +187,27 @@ public class FileProcessor {
             log.error("[FileProcessor] Falha ao mapear diretórios locais.", e);
         }
 
-        for (ArquivoSftpProcessado registro : elegíveis) {
-
-            // Busca O(1) instantânea na memória, sem acessar o disco!
+        for (ArquivoSftpProcessado registro : elegiveis) {
             Path arquivo = cacheDisco.get(registro.getNomeArquivo());
 
             if (arquivo == null) {
                 log.warn("[FileProcessor] Arquivo apagado do disco (Ignorando retry): {}", registro.getNomeArquivo());
                 arquivosComErro++;
-                continue; // Deixa para a "Auto-Cura" do SftpDownloader baixar de novo
+                continue;
             }
 
-            ResultadoArquivo resultado = processarArquivo(
-                    arquivo, registro.getTipoFonte(), localCache, pracaCache);
+            ResultadoArquivo resultado = processarArquivo(arquivo, registro.getTipoFonte());
             totalRegistros += resultado.registrosSalvos();
+            if (resultado.novosDominiosRegistrados()) novosDominios = true;
+
             atualizarStatusNoBanco(registro.getNomeArquivo(), resultado);
 
             if (!resultado.sucesso()) arquivosComErro++;
         }
 
-        return new ResultadoLote(totalRegistros, elegíveis.size() - arquivosComErro, arquivosComErro);
+        if (novosDominios) carregarLocalCacheParaMemoria();
+
+        return new ResultadoLote(totalRegistros, elegiveis.size() - arquivosComErro, arquivosComErro);
     }
 
     private void coletarDominio(Map<String, Set<String>> dominios, Radars radar, TipoFonte tipoFonte) {
@@ -218,12 +240,12 @@ public class FileProcessor {
                 ));
     }
 
-    public record ResultadoArquivo(boolean sucesso, int registrosSalvos, String mensagemErro) {
-        static ResultadoArquivo sucesso(int registros) {
-            return new ResultadoArquivo(true, registros, null);
+    public record ResultadoArquivo(boolean sucesso, int registrosSalvos, String mensagemErro, boolean novosDominiosRegistrados) {
+        static ResultadoArquivo sucesso(int registros, boolean novosDominios) {
+            return new ResultadoArquivo(true, registros, null, novosDominios);
         }
         static ResultadoArquivo erro(String msg) {
-            return new ResultadoArquivo(false, 0, msg);
+            return new ResultadoArquivo(false, 0, msg, false);
         }
     }
 

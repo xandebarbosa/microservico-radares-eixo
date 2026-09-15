@@ -45,23 +45,23 @@ public class RadarLineParser {
                     ")$"
     );
 
+    // Regex pré-compiladas para otimização de CPU no processamento em lote
     private static final Pattern DIACRITICS_PATTERN = Pattern.compile("\\p{InCombiningDiacriticalMarks}+");
+    private static final Pattern MULTIPLE_SPACES_PATTERN = Pattern.compile("\\s+");
     private static final DateTimeFormatter DATE_FORMATTER_BR = DateTimeFormatter.ofPattern("dd/MM/yyyy");
 
     /**
      * Faz o parse de uma linha CSV.
      *
-     * @param linha        Linha do arquivo no formato {@code dataHora;placa;localizacao;sentido}.
-     * @param tipoFonte    Origem do arquivo (RECEBIDOS ou RADAR).
-     * @param localCache   Cache de localização por chave {@code rodovia|km}.
-     * @param pracaCache   Cache de localização por nome de praça normalizado.
+     * @param linha      Linha do arquivo no formato {@code dataHora;placa;localizacao;sentido}.
+     * @param tipoFonte  Origem do arquivo (RECEBIDOS ou RADAR).
+     * @param localCache Cache de localização por chave {@code rodovia|km}.
      * @return {@link Optional} com o radar parseado, vazio se a linha for inválida.
      */
     public Optional<Radars> parseLine(
             String linha,
             TipoFonte tipoFonte,
-            Map<String, LocalizacaoRadar> localCache,
-            Map<String, LocalizacaoRadar> pracaCache) {
+            Map<String, LocalizacaoRadar> localCache) {
 
         if (linha == null || linha.isBlank()) {
             return Optional.empty();
@@ -111,8 +111,8 @@ public class RadarLineParser {
             // Normaliza a placa
             String placa = normalizarPlaca(placaBruta);
 
-            // Remove múltiplos espaços e caracteres indesejados como setas (↑)
-            String sentido = sentidoBruto.replaceAll("\\s+", " ").replace("↑", "").trim();
+            // Otimização: usa regex compilada para remover múltiplos espaços em vez de compilar a cada iteração
+            String sentido = MULTIPLE_SPACES_PATTERN.matcher(sentidoBruto).replaceAll(" ").replace("↑", "").trim();
 
             // Converte as siglas para o nome completo (N -> Norte, L -> Leste, etc)
             if (sentido.length() == 1) {
@@ -135,16 +135,16 @@ public class RadarLineParser {
                     ? LocalDate.parse(dataStr, DATE_FORMATTER_BR)
                     : LocalDate.parse(dataStr);
 
-            // Parse e limpeza da Hora (remove os milissegundos ".000" se existirem)
-            if (horaStr.contains(".")) {
-                horaStr = horaStr.split("\\.")[0];
+            // Otimização: limpa os milissegundos ".000" sem fazer uso de split (zero alocação de array na Heap)
+            int dotIndex = horaStr.indexOf('.');
+            if (dotIndex != -1) {
+                horaStr = horaStr.substring(0, dotIndex);
             }
             LocalTime hora = LocalTime.parse(horaStr);
 
             // Extração de Localização baseada na Fonte
             String rodoviaFinal;
             String kmFinal;
-            LocalizacaoRadar localizacao;
 
             if (tipoFonte == TipoFonte.RADAR) {
                 rodoviaFinal = extrairRodovia(localizacaoBruta);
@@ -153,13 +153,9 @@ public class RadarLineParser {
                 if (rodoviaFinal.isBlank()) {
                     log.warn("[Parser] ALERTA: Regex não extraiu a rodovia de: '{}'.", localizacaoBruta);
                 }
-                localizacao = localCache.get(chaveCache(rodoviaFinal, kmFinal));
             } else {
                 // Remove a palavra "Principal " e arruma possíveis espaços duplos
                 localizacaoBruta = localizacaoBruta.replace("Principal ", "").replaceAll("\\s+", " ").trim();
-
-                String chave = normalizar(localizacaoBruta);
-                localizacao  = pracaCache.get(chave);
 
                 rodoviaFinal = localizacaoBruta.length() > 255
                         ? localizacaoBruta.substring(0, 255)
@@ -176,7 +172,6 @@ public class RadarLineParser {
                     .km(kmFinal)
                     .sentido(sentido)
                     .tipoFonte(tipoFonte)
-                    .localizacao(localizacao)
                     .build();
 
             return Optional.of(radar);
@@ -198,8 +193,8 @@ public class RadarLineParser {
     public String normalizar(String texto) {
         if (texto == null) return "";
         String nfd = Normalizer.normalize(texto, Normalizer.Form.NFD);
-        return Pattern.compile("\\p{InCombiningDiacriticalMarks}+")
-                .matcher(nfd).replaceAll("").trim().toUpperCase();
+        // Otimização: utiliza o Pattern pré-compilado para evitar sobrecarga de CPU
+        return DIACRITICS_PATTERN.matcher(nfd).replaceAll("").trim().toUpperCase();
     }
 
     private String extrairRodovia(String texto) {
@@ -211,17 +206,27 @@ public class RadarLineParser {
         Matcher mk = PATTERN_KM.matcher(texto);
         Matcher mm = PATTERN_METROS.matcher(texto);
 
-        String vk = mk.find() ? String.format("%03d", Integer.parseInt(mk.group(1))) : "000";
-        String vm = mm.find() ? String.format("%03d", Integer.parseInt(mm.group(1))) : "000";
+        String vk = mk.find() ? formatPadLeft3(mk.group(1)) : "000";
+        String vm = mm.find() ? formatPadLeft3(mm.group(1)) : "000";
 
         return (vk.equals("000") && vm.equals("000")) ? "" : vk + "+" + vm;
+    }
+
+    /**
+     * Otimização: formatação de preenchimento manual ultrarrápida.
+     * Evita o overhead severo do String.format("%03d") ao processar milhões de registros.
+     */
+    private String formatPadLeft3(String val) {
+        if (val == null) return "000";
+        if (val.length() == 1) return "00" + val;
+        if (val.length() == 2) return "0" + val;
+        return val;
     }
 
     private String normalizarPlaca(String placa) {
         if (placa == null || placa.isBlank()) return "N/I";
         String limpa = placa.replaceAll("[^a-zA-Z0-9]", "").toUpperCase();
 
-        // Se a string sanitizada ficar vazia (ex: continha apenas traços ou espaços)
         if (limpa.isBlank()) return "N/I";
 
         if (limpa.length() > 7) {

@@ -8,6 +8,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Orquestra o ciclo completo SFTP com <b>processamento em lotes intercalados</b>.
@@ -62,13 +63,19 @@ public class SftpOrchestrator {
             SftpDownloader.DownloadSummary resumo = downloader.baixarEmLotes(
                     conn.channel(),
                     (lote, tipoFonte) -> {
-                        log.info("[SFTP] Processando lote de {} arquivo(s) [{}]...",
-                                lote.size(), tipoFonte);
-                        FileProcessor.ResultadoLote resultado = fileProcessor.processar(lote, tipoFonte);
-                        log.info("[SFTP] Lote processado: {} registros | {} ok | {} erro.",
-                                resultado.registrosTotais(),
-                                resultado.arquivosSucesso(),
-                                resultado.arquivosComErro());
+                        log.info("[SFTP] Lote de {} arquivo(s) [{}] enviado para background.", lote.size(), tipoFonte);
+
+                        // Processamento Assíncrono: Libera a thread principal para continuar baixando
+                        CompletableFuture.runAsync(() -> {
+                            FileProcessor.ResultadoLote resultado = fileProcessor.processar(lote, tipoFonte);
+                            log.info("[SFTP] Lote processado: {} registros | {} ok | {} erro.",
+                                    resultado.registrosTotais(),
+                                    resultado.arquivosSucesso(),
+                                    resultado.arquivosComErro());
+                        }).exceptionally(ex -> {
+                            log.error("[SFTP-Async] Falha não tratada no processamento em lote.", ex);
+                            return null;
+                        });
                     }
             );
 

@@ -140,8 +140,8 @@ public class SftpDownloader {
         List<Path> loteAtual = new ArrayList<>(batchSize);
 
         try {
-            sftp.cd(remotePath);
-            Vector<ChannelSftp.LsEntry> entries = sftp.ls(".");
+            // Otimização: Uso de caminhos absolutos no ls(), evitando múltiplos sftp.cd()
+            Vector<ChannelSftp.LsEntry> entries = sftp.ls(remotePath);
             log.info("[SFTP] Varrendo '{}': {} entrada(s).", remotePath, entries.size());
 
             for (ChannelSftp.LsEntry entry : entries) {
@@ -221,7 +221,6 @@ public class SftpDownloader {
      * Baixa um arquivo e persiste um registro {@code BAIXADO} no banco.
      * O status será atualizado pelo orquestrador após o processamento.
      */
-    @Transactional
     protected Optional<Path> baixarArquivo(
             ChannelSftp sftp,
             String nomeRemoto,

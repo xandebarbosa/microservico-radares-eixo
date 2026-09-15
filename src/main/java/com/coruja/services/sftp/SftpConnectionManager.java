@@ -45,6 +45,10 @@ public class SftpConnectionManager {
         Session session = jsch.getSession(user, host, port);
         session.setPassword(pass);
         session.setConfig("StrictHostKeyChecking", "no");
+
+        // Mantém a sessão viva durante o processamento em background (ping a cada 15s)
+        session.setServerAliveInterval(1500);
+
         session.connect(timeout);
 
         ChannelSftp channel = (ChannelSftp) session.openChannel("sftp");

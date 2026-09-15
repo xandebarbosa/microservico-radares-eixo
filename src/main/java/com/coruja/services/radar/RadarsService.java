@@ -150,6 +150,12 @@ public class RadarsService {
                 .collect(Collectors.toList());
     }
 
+    // 🚀 NOVO: Método para limpar o cache instantaneamente quando um novo radar for descoberto via SFTP
+    @CacheEvict(value = "mapa-radares-eixo", allEntries = true)
+    public void invalidarCacheMapaLocalizacoes() {
+        log.info("[Eixo] Cache 'mapa-radares-eixo' invalidado sob demanda para atualização do Front-End.");
+    }
+
     public List<RadarsDTO> buscarUltimos(int limite) {
         // Ordena para pegar as passagens mais recentes
         Pageable pageable = PageRequest.of(0, limite,

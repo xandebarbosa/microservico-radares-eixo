@@ -60,7 +60,7 @@ public class RadarsController {
             @PageableDefault(size = 20, sort = {"data", "hora"}, direction = Sort.Direction.DESC) Pageable pageable) {
 
         // 💡 Limpeza cega e segura contra lixo do Front-End
-        km = limparParametro(km);
+        /*km = limparParametro(km);
         rodovia = limparParametro(rodovia);
         sentido = limparParametro(sentido);
 
@@ -86,16 +86,16 @@ public class RadarsController {
         //TipoFonte tipoFonte = temKm ? TipoFonte.RADAR : TipoFonte.RECEBIDOS;
 
         log.info("[Eixo] busca-local unificada | data={} | rodovia='{}' | km='{}' | sentido='{}'",
-                data, rodovia, km, sentido);
+                data, rodovia, km, sentido);*/
 
         // 💡 Já não forçamos o TipoFonte. Queremos que a base de dados procure em TODAS as fontes.
         BuscaLocalRequest req = BuscaLocalRequest.builder()
                 .data(data)
                 .horaInicial(horaInicial)
                 .horaFinal(horaFinal)
-                .rodovia(rodovia)
-                .km(km)
-                .sentido(sentido)
+                .rodovia(limparEResolverEncoding(rodovia, true))
+                .km(limparEResolverEncoding(km, false))
+                .sentido(limparEResolverEncoding(sentido, false))
                 .build();
 
         log.info("Retorno da busca por Local: {}", req);
@@ -123,8 +123,8 @@ public class RadarsController {
                 .data(data)
                 .horaInicial(horaInicial)
                 .horaFinal(horaFinal)
-                .rodovia(rodovia)
-                .sentido(sentido)
+                .rodovia(limparEResolverEncoding(rodovia, true))
+                .sentido(limparEResolverEncoding(sentido, false))
                 .tipoFonte(TipoFonte.RECEBIDOS)
                 .build();
 
@@ -153,9 +153,9 @@ public class RadarsController {
                 .data(data)
                 .horaInicial(horaInicial)
                 .horaFinal(horaFinal)
-                .rodovia(rodovia)
-                .km(km)
-                .sentido(sentido)
+                .rodovia(limparEResolverEncoding(rodovia, true))
+                .km(limparEResolverEncoding(km, false))
+                .sentido(limparEResolverEncoding(sentido, false))
                 .tipoFonte(TipoFonte.RADAR)
                 .build();
 
@@ -252,6 +252,34 @@ public class RadarsController {
         }
         return param.trim();
     }
+
+    /**
+     * 🚀 Centraliza a limpeza de strings e resolução de duplo encoding vindos do BFF.
+     */
+    private String limparEResolverEncoding(String param, boolean isRodovia) {
+        if (param == null || param.isBlank() ||
+                param.equalsIgnoreCase("null") ||
+                param.equalsIgnoreCase("undefined") ||
+                param.equalsIgnoreCase("N/I") ||
+                param.equalsIgnoreCase("N%2FI") ||
+                param.equalsIgnoreCase("N/A")) {
+            return null;
+        }
+
+        String limpo = param;
+
+        if (isRodovia) {
+            try {
+                limpo = decode(limpo, StandardCharsets.UTF_8);
+            } catch (Exception ignored) { }
+        } else {
+            // Repara os espaços convertidos erroneamente em sinal de + no Front-end (especialmente KMs)
+            limpo = limpo.replace("%252B", "+").replace("%2B", "+").replace(" ", "+");
+        }
+
+        return limpo.trim();
+    }
+
     @GetMapping("/ultimos")
     public ResponseEntity<List<RadarsDTO>> buscarUltimos(@RequestParam(defaultValue = "10") int limite) {
         List<RadarsDTO> ultimosRadares = radarsService.buscarUltimos(limite);
