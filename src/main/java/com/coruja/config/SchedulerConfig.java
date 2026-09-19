@@ -18,22 +18,19 @@ public class SchedulerConfig implements SchedulingConfigurer {
 
     @Override
     public void configureTasks(ScheduledTaskRegistrar taskRegistrar) {
-        // Força o registrar a usar o nosso Bean customizado
-        taskRegistrar.setTaskScheduler(taskScheduler());
+        taskRegistrar.setTaskScheduler(taskSchedulerEixo());
     }
 
-    // A mágica acontece aqui: Expor como @Bean garante que o Spring
-    // substitua o agendador padrão em todo o contexto da aplicação.
     @Bean(name = "taskSchedulerEixo")
-    public ThreadPoolTaskScheduler taskScheduler() {
+    public ThreadPoolTaskScheduler taskSchedulerEixo() {
         ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
         scheduler.setPoolSize(5);
         scheduler.setThreadNamePrefix("coruja-task-eixo-");
 
         // Impede que uma exceção em um job pare o agendador inteiro
-        scheduler.setErrorHandler(t -> log.error("Erro inesperado no Scheduler: ", t));
+        scheduler.setErrorHandler(t -> log.error("[Scheduler] Erro inesperado: ", t));
 
-        // Garante que o app espere os jobs terminarem ao desligar
+        // Garante que o app espere os jobs terminarem ao desligar (Graceful Shutdown)
         scheduler.setWaitForTasksToCompleteOnShutdown(true);
         scheduler.setAwaitTerminationSeconds(60);
 

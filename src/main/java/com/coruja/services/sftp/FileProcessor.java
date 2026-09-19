@@ -191,8 +191,15 @@ public class FileProcessor {
             Path arquivo = cacheDisco.get(registro.getNomeArquivo());
 
             if (arquivo == null) {
-                log.warn("[FileProcessor] Arquivo apagado do disco (Ignorando retry): {}", registro.getNomeArquivo());
+                log.warn("[FileProcessor] Arquivo apagado do disco (Cancelando retry): {}", registro.getNomeArquivo());
                 arquivosComErro++;
+
+                // 🟢 CORREÇÃO: Agora notificamos o banco que deu erro por falta do arquivo físico.
+                // Isso fará a coluna 'tentativas' incrementar. Quando chegar em 3, ele para de tentar.
+                atualizarStatusNoBanco(
+                        registro.getNomeArquivo(),
+                        ResultadoArquivo.erro("Arquivo físico não encontrado no disco local para retry.")
+                );
                 continue;
             }
 

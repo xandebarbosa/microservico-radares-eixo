@@ -17,10 +17,16 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -47,7 +53,8 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class SftpDownloader {
 
-    // ─── Configurações ───────────────────────────────────────────
+    private final ArquivoSftpProcessadoRepository arquivoRepo;
+    private final SftpConnectionManager connectionManager;
 
     @Value("${sftp.remote.directory:/recebidos}")
     private String remoteDirRecebidos;
@@ -58,292 +65,138 @@ public class SftpDownloader {
     @Value("${sftp.local.directory}")
     private String localBaseDirectory;
 
-    @Value("${sftp.download.limite.dias:10}")
-    private int limiteDias;
-
-    /** Quantos arquivos baixar por lote antes de devolver ao orquestrador para processamento. */
-    @Value("${sftp.download.batch.size:50}")
-    private int batchSize;
-
-    /** Máximo de tentativas antes de abandonar um arquivo com erro. */
     @Value("${sftp.max.tentativas:3}")
     private int maxTentativas;
 
-    // ─── Dependências ────────────────────────────────────────────
+    @Value("${sftp.download.limite.dias:90}")
+    private int limiteDias;
 
-    private final ArquivoSftpProcessadoRepository arquivoRepo;
+    private final ExecutorService sftpExecutor = Executors.newFixedThreadPool(15);
 
-    // ─── Patterns ────────────────────────────────────────────────
-
-    private static final Pattern PATTERN_ISO_T           = Pattern.compile("(\\d{4}-\\d{2}-\\d{2})T");
-    private static final Pattern PATTERN_APOS_UNDERSCORE = Pattern.compile("_(\\d{8})");
-    private static final Pattern PATTERN_PASTA_DATA      = Pattern.compile("^(\\d{8})$");
-    private static final DateTimeFormatter FMT_YYYYMMDD  = DateTimeFormatter.ofPattern("yyyyMMdd");
-
-    // ─────────────────────────────────────────────────────────────
-    // API PÚBLICA
-    // ─────────────────────────────────────────────────────────────
-
-    /**
-     * Descobre arquivos novos no SFTP e os entrega ao {@code consumer} em lotes.
-     *
-     * <p>O consumer (normalmente o {@link SftpOrchestrator}) processa cada lote
-     * imediatamente — sem acumular todos os arquivos em memória.
-     *
-     * @param sftp     Canal SFTP aberto.
-     * @param consumer Callback chamado a cada lote; recebe o lote e o TipoFonte.
-     * @return Resumo total de arquivos baixados (somando todos os lotes).
-     */
-    public DownloadSummary baixarEmLotes(ChannelSftp sftp, BatchConsumer consumer) throws IOException {
-
-        Path localRecebidos = Path.of(localBaseDirectory, "recebidos");
-        Path localRadar     = Path.of(localBaseDirectory, "radar");
-        Files.createDirectories(localRecebidos);
-        Files.createDirectories(localRadar);
-
-        LocalDate dataLimite = LocalDate.now().minusDays(limiteDias);
-        log.info("[SFTP] Limite: {} dia(s) → aceitando arquivos a partir de {}.", limiteDias, dataLimite);
-
-        // Carrega nomes já conhecidos do banco UMA VEZ para evitar N selects na listagem
-        Set<String> jaConhecidosRecebidos = arquivoRepo.findNomesByTipoFonte(TipoFonte.RECEBIDOS);
-        Set<String> jaConhecidosRadar     = arquivoRepo.findNomesByTipoFonte(TipoFonte.RADAR);
-
-        log.info("[SFTP] Já conhecidos no banco: {} /recebidos | {} /radar.",
-                jaConhecidosRecebidos.size(), jaConhecidosRadar.size());
-
-        int totalRecebidos = processarPastaEmLotes(
-                sftp, remoteDirRecebidos, localRecebidos,
-                TipoFonte.RECEBIDOS, jaConhecidosRecebidos, dataLimite, consumer);
-
-        int totalRadar = processarPastaEmLotes(
-                sftp, remoteDirRadar, localRadar,
-                TipoFonte.RADAR, jaConhecidosRadar, dataLimite, consumer);
-
-        return new DownloadSummary(totalRecebidos, totalRadar);
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // PROCESSAMENTO POR PASTA (com suporte a subpastas recursivas)
-    // ─────────────────────────────────────────────────────────────
-
-    @SuppressWarnings("unchecked")
-    private int processarPastaEmLotes(
-            ChannelSftp sftp,
-            String remotePath,
-            Path localPath,
-            TipoFonte tipoFonte,
-            Set<String> jaConhecidos,
-            LocalDate dataLimite,
-            BatchConsumer consumer) {
-
-        int totalBaixados = 0;
-        List<Path> loteAtual = new ArrayList<>(batchSize);
+    public void baixarArquivos(BatchConsumer consumer) {
+        long limiteEpoch = Instant.now().minus(limiteDias, ChronoUnit.DAYS).getEpochSecond();
 
         try {
-            // Otimização: Uso de caminhos absolutos no ls(), evitando múltiplos sftp.cd()
-            Vector<ChannelSftp.LsEntry> entries = sftp.ls(remotePath);
-            log.info("[SFTP] Varrendo '{}': {} entrada(s).", remotePath, entries.size());
+            processarDiretorioContinuo(remoteDirRecebidos, TipoFonte.RECEBIDOS,
+                    Path.of(localBaseDirectory, "recebidos"), limiteEpoch, consumer);
 
-            for (ChannelSftp.LsEntry entry : entries) {
-                String nome = entry.getFilename();
-                if (nome.startsWith(".")) continue;
+            processarDiretorioContinuo(remoteDirRadar, TipoFonte.RADAR,
+                    Path.of(localBaseDirectory, "radar"), limiteEpoch, consumer);
 
-                if (entry.getAttrs().isDir()) {
-                    // Subpastas: filtra por data (apenas /radar tem subpastas yyyyMMdd)
-                    if (pastaForaDoPeriodo(nome, dataLimite)) {
-                        log.debug("[SFTP] Subpasta fora do período, pulando: {}/{}", remotePath, nome);
-                        continue;
-                    }
-                    Path subLocal = localPath.resolve(nome);
-                    Files.createDirectories(subLocal);
-                    totalBaixados += processarPastaEmLotes(
-                            sftp, remotePath + "/" + nome, subLocal,
-                            tipoFonte, jaConhecidos, dataLimite, consumer);
-                    sftp.cd(remotePath);
-                    continue;
-                }
-
-                // ── Arquivo folha ────────────────────────────────────────
-                Path arquivoLocal = localPath.resolve(nome);
-
-                // 1. FILTRO DE DATA PRIMEIRO (Filtra antes de qualquer outra lógica)
-                if (!isDentroDoPeriodo(nome, dataLimite)) {
-                    continue; // Ignora ficheiros antigos silenciosamente
-                }
-
-                // 2. VERIFICAÇÃO DE CACHE E AUTO-CURA
-                if (jaConhecidos.contains(nome)) {
-                    if (!Files.exists(arquivoLocal)) {
-                        log.warn("[SFTP] AUTO-CURA: Ficheiro '{}' sumiu do disco! Forçando re-download.", nome);
-                    } else {
-                        // Está no banco, está no disco e está no limite de dias. Ignorar.
-                        continue;
-                    }
-                }
-
-                Optional<Path> baixado = baixarArquivo(sftp, nome, localPath, tipoFonte, jaConhecidos);
-                baixado.ifPresent(p -> {
-                    loteAtual.add(p);
-                    log.debug("[SFTP] Adicionado ao lote: {} ({}/{})", nome, loteAtual.size(), batchSize);
-                });
-
-                if (loteAtual.size() >= batchSize) {
-                    log.info("[SFTP] Lote de {} ficheiro(s) pronto para processamento ({}).",
-                            loteAtual.size(), tipoFonte);
-                    consumer.processar(new ArrayList<>(loteAtual), tipoFonte);
-                    totalBaixados += loteAtual.size();
-                    loteAtual.clear();
-                }
-            }
-        } catch (SftpException e) {
-            // Usamos e.toString() em vez de getMessage() para evitar mensagens vazias quando a rede falha
-            log.error("[SFTP] Erro ao varrer '{}': {}", remotePath, e.toString());
-        } catch (IOException e) {
-            log.error("[SFTP] Erro de I/O em '{}': {}", remotePath, e.toString());
+        } catch (Exception e) {
+            log.error("[SFTP] Erro crítico na varredura contínua dos diretórios remotos.", e);
         }
-
-        // Processa o lote residual (último lote, menor que batchSize)
-        if (!loteAtual.isEmpty()) {
-            log.info("[SFTP] Lote residual de {} arquivo(s) ({}).", loteAtual.size(), tipoFonte);
-            consumer.processar(new ArrayList<>(loteAtual), tipoFonte);
-            totalBaixados += loteAtual.size();
-            loteAtual.clear();
-        }
-
-        return totalBaixados;
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // DOWNLOAD + REGISTRO NO BANCO
-    // ─────────────────────────────────────────────────────────────
-
     /**
-     * Baixa um arquivo e persiste um registro {@code BAIXADO} no banco.
-     * O status será atualizado pelo orquestrador após o processamento.
+     * Varre pastas e DISPARA o download imediatamente, sem esperar montar lotes inteiros.
      */
-    protected Optional<Path> baixarArquivo(
-            ChannelSftp sftp,
-            String nomeRemoto,
-            Path destino,
-            TipoFonte tipoFonte,
-            Set<String> jaConhecidos) {
+    private void processarDiretorioContinuo(String remoteBaseDir, TipoFonte tipo,
+                                            Path localBaseDir, long limiteEpoch, BatchConsumer consumer) {
 
-        Path alvo = destino.resolve(nomeRemoto);
-        try (InputStream is = sftp.get(nomeRemoto)) {
-            Files.copy(is, alvo, StandardCopyOption.REPLACE_EXISTING);
+        Set<String> conhecidos = arquivoRepo.findNomesByTipoFonte(tipo);
+        log.info("[SFTP] Iniciando varredura contínua em '{}'...", remoteBaseDir);
 
-            // 🚀 AUTO-CURA: Tenta encontrar o registro que estava em ERRO.
-            // Se encontrar, faz um UPDATE. Se não encontrar, faz um INSERT (Cria novo).
-            ArquivoSftpProcessado registro = arquivoRepo.findByNomeArquivo(nomeRemoto)
+        Queue<DirToScan> dirsToScan = new ConcurrentLinkedQueue<>();
+        dirsToScan.add(new DirToScan(remoteBaseDir, localBaseDir));
+
+        // Lista de CompletableFutures para rastrear todos os downloads ativos
+        List<CompletableFuture<Void>> todosDownloads = Collections.synchronizedList(new ArrayList<>());
+
+        while (!dirsToScan.isEmpty()) {
+            List<CompletableFuture<Void>> folderScanFutures = new ArrayList<>();
+            List<DirToScan> currentLevel = new ArrayList<>();
+            while (!dirsToScan.isEmpty()) currentLevel.add(dirsToScan.poll());
+
+            for (DirToScan dir : currentLevel) {
+                folderScanFutures.add(CompletableFuture.runAsync(() -> {
+                    try (SftpConnectionManager.SftpConnection conn = connectionManager.borrowConnection()) {
+                        Files.createDirectories(dir.local());
+
+                        @SuppressWarnings("unchecked")
+                        Vector<ChannelSftp.LsEntry> entries = conn.channel().ls(dir.remote());
+
+                        for (ChannelSftp.LsEntry entry : entries) {
+                            String nome = entry.getFilename();
+                            if (nome.equals(".") || nome.equals("..") || nome.equalsIgnoreCase("Processados")) continue;
+
+                            String fullRemote = dir.remote() + "/" + nome;
+                            Path fullLocal = dir.local().resolve(nome);
+                            long mTime = entry.getAttrs().getMTime();
+
+                            if (entry.getAttrs().isDir()) {
+                                boolean isRaiz = remoteDirRadar.equals(fullRemote) || remoteDirRecebidos.equals(fullRemote);
+                                if (isRaiz || mTime >= limiteEpoch) {
+                                    dirsToScan.add(new DirToScan(fullRemote, fullLocal));
+                                }
+                            }
+                            else if (nome.toLowerCase().endsWith(".csv") && mTime >= limiteEpoch) {
+                                if (!conhecidos.contains(nome)) {
+                                    // 🟢 DISPARO IMEDIATO: Encontrou? Baixa e processa agora!
+                                    ArquivoPendente pendente = new ArquivoPendente(fullRemote, fullLocal, nome, tipo);
+                                    todosDownloads.add(
+                                            CompletableFuture.supplyAsync(() -> baixarUnico(pendente), sftpExecutor)
+                                                    .thenAccept(pathOpt -> pathOpt.ifPresent(path -> {
+                                                        // Envia o arquivo sozinho (lote de 1) para o consumer assim que acabar
+                                                        consumer.processar(List.of(path), tipo);
+                                                    }))
+                                    );
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.warn("[SFTP] Falha ao listar diretório {}: {}", dir.remote(), e.getMessage());
+                    }
+                }, sftpExecutor));
+            }
+            // Espera terminar de listar o nível atual de pastas antes de descer pro próximo nível
+            CompletableFuture.allOf(folderScanFutures.toArray(new CompletableFuture[0])).join();
+        }
+
+        // 🟢 Aguarda todos os downloads disparados durante a varredura terminarem
+        CompletableFuture.allOf(todosDownloads.toArray(new CompletableFuture[0])).join();
+        log.info("[SFTP] Ciclo de '{}' 100% finalizado (Varredura + Downloads).", remoteBaseDir);
+    }
+
+    private Optional<Path> baixarUnico(ArquivoPendente pendente) {
+        log.info("[SFTP] ⬇️ Baixando: {}", pendente.nomeArquivo());
+
+        try (SftpConnectionManager.SftpConnection conn = connectionManager.borrowConnection();
+             InputStream is = conn.channel().get(pendente.remoteFullPath())) {
+
+            Files.copy(is, pendente.localFullPath(), StandardCopyOption.REPLACE_EXISTING);
+
+            ArquivoSftpProcessado registro = arquivoRepo.findByNomeArquivo(pendente.nomeArquivo())
                     .orElseGet(() -> ArquivoSftpProcessado.builder()
-                            .nomeArquivo(nomeRemoto)
-                            .tipoFonte(tipoFonte)
+                            .nomeArquivo(pendente.nomeArquivo())
+                            .tipoFonte(pendente.tipo())
                             .build());
 
             registro.setStatus(StatusProcessamento.BAIXADO);
             registro.setBaixadoEm(LocalDateTime.now());
-            registro.setTentativas(0); // Zera as tentativas para dar uma nova chance
-            registro.setMensagemErro(null); // Limpa a mensagem de erro antiga do banco
+            registro.setTentativas(0);
 
+            // Salva individualmente no banco (já que não temos mais lotes amarrados à varredura)
             arquivoRepo.save(registro);
 
-            jaConhecidos.add(nomeRemoto);
-
-            log.info("[SFTP] ✅ Baixado e registrado: {}", nomeRemoto);
-            return Optional.of(alvo);
+            log.info("[SFTP] ✅ Concluído: {}", pendente.nomeArquivo());
+            return Optional.of(pendente.localFullPath());
 
         } catch (Exception e) {
-            log.error("[SFTP] ❌ Falha ao baixar '{}': {}", nomeRemoto, e.toString());
-
-            try {
-                ArquivoSftpProcessado falha = arquivoRepo.findByNomeArquivo(nomeRemoto)
-                        .orElseGet(() -> ArquivoSftpProcessado.builder()
-                                .nomeArquivo(nomeRemoto)
-                                .tipoFonte(tipoFonte)
-                                .build());
-
-                falha.setStatus(StatusProcessamento.ERRO);
-                falha.setBaixadoEm(LocalDateTime.now());
-                falha.setMensagemErro("Falha no download: " + e.getMessage());
-                falha.setTentativas(1);
-
-                arquivoRepo.save(falha);
-                jaConhecidos.add(nomeRemoto);
-            } catch (Exception ex) {
-                log.warn("[SFTP] Não foi possível registrar falha no banco para '{}': {}", nomeRemoto, ex.getMessage());
-            }
+            log.error("[SFTP] ❌ Erro ao baixar '{}': {}", pendente.nomeArquivo(), e.getMessage());
             return Optional.empty();
         }
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // RETRY DE ARQUIVOS COM ERRO
-    // ─────────────────────────────────────────────────────────────
-
-    /**
-     * Retorna arquivos que falharam em ciclos anteriores e ainda têm tentativas disponíveis.
-     * Chamado pelo {@link SftpOrchestrator} em ciclos separados para não bloquear novos downloads.
-     */
     public List<ArquivoSftpProcessado> listarElegiveisParaRetry() {
         return arquivoRepo.findByStatusAndTentativasLessThan(StatusProcessamento.ERRO, maxTentativas);
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // FILTROS
-    // ─────────────────────────────────────────────────────────────
-
-    private boolean pastaForaDoPeriodo(String nomePasta, LocalDate dataLimite) {
-        Matcher m = PATTERN_PASTA_DATA.matcher(nomePasta);
-        if (!m.matches()) return false;
-        try {
-            LocalDate dataPasta = LocalDate.parse(nomePasta, FMT_YYYYMMDD);
-            return dataPasta.isBefore(dataLimite);
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private boolean isDentroDoPeriodo(String nomeArquivo, LocalDate dataLimite) {
-        return extrairDataDoNome(nomeArquivo)
-                .map(d -> !d.isBefore(dataLimite))
-                .orElse(true); // sem data no nome → baixar por segurança
-    }
-
-    private Optional<LocalDate> extrairDataDoNome(String nome) {
-        Matcher m1 = PATTERN_ISO_T.matcher(nome);
-        if (m1.find()) {
-            try { return Optional.of(LocalDate.parse(m1.group(1))); } catch (Exception ignored) {}
-        }
-        Matcher m2 = PATTERN_APOS_UNDERSCORE.matcher(nome);
-        if (m2.find()) {
-            try { return Optional.of(LocalDate.parse(m2.group(1), FMT_YYYYMMDD)); } catch (Exception ignored) {}
-        }
-        return Optional.empty();
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // TIPOS AUXILIARES
-    // ─────────────────────────────────────────────────────────────
-
-    /**
-     * Callback para o orquestrador receber e processar cada lote.
-     */
     @FunctionalInterface
     public interface BatchConsumer {
         void processar(List<Path> lote, TipoFonte tipoFonte);
     }
 
-    /**
-     * Resumo ao final do ciclo completo.
-     */
-    public record DownloadSummary(int recebidos, int radar) {
-        public int total() { return recebidos + radar; }
-        public boolean isEmpty() { return total() == 0; }
-
-        @Override
-        public String toString() {
-            return String.format("DownloadSummary[recebidos=%d, radar=%d, total=%d]",
-                    recebidos, radar, total());
-        }
-    }
+    private record ArquivoPendente(String remoteFullPath, Path localFullPath, String nomeArquivo, TipoFonte tipo) {}
+    private record DirToScan(String remote, Path local) {}
 }

@@ -157,6 +157,9 @@ public class RadarLineParser {
                 // Remove a palavra "Principal " e arruma possíveis espaços duplos
                 localizacaoBruta = localizacaoBruta.replace("Principal ", "").replaceAll("\\s+", " ").trim();
 
+                // 🟢 SOLUÇÃO: Remove automaticamente sufixos direcionais (Ex: " 02-L", " 08-O", " 19-N")
+                localizacaoBruta = localizacaoBruta.replaceAll("\\s+\\d{2}-[a-zA-Z]$", "").trim();
+
                 rodoviaFinal = localizacaoBruta.length() > 255
                         ? localizacaoBruta.substring(0, 255)
                         : localizacaoBruta;

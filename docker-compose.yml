@@ -33,7 +33,9 @@ services:
       - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
       - RABBITMQ_EXCHANGE_NAME=radares_exchange
       - RABBITMQ_ROUTING_KEY=radares.eixo
-      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
+      - eureka.client.serviceUrl.defaultZone=http://eureka-server:8761/eureka/
+      - eureka.instance.preferIpAddress=true
+      - TZ=America/Sao_Paulo
       # --- Integração com Config Server e Eureka (Adicione se o seu projeto usar) ---
       #- SPRING_CONFIG_IMPORT=configserver:http://config-server:8888
       #- EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/

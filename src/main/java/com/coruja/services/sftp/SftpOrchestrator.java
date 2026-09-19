@@ -1,125 +1,121 @@
 package com.coruja.services.sftp;
 
 import com.coruja.entities.ArquivoSftpProcessado;
+import com.coruja.exceptions.SftpUnavailableException;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Orquestra o ciclo completo SFTP com <b>processamento em lotes intercalados</b>.
+ * Orquestra o ciclo completo SFTP com <b>processamento em lotes assíncronos e paralelos</b>.
  *
- * <h3>Fluxo do ciclo:</h3>
+ * <h3>Fluxo otimizado:</h3>
  * <pre>
- *   1. Abre conexão SFTP
- *   2. Para cada lote de arquivos baixados:
- *      a. Baixa {@code sftp.download.batch.size} arquivos (padrão: 50)
- *      b. Imediatamente processa e persiste os registros no banco
- *      c. Atualiza status de cada arquivo para PROCESSADO ou ERRO
- *   3. Ao final do ciclo principal, retenta arquivos com ERRO de ciclos anteriores
- *   4. Fecha conexão
+ *   1. Aciona o Downloader (que utiliza Connection Pool e gerencia sua própria concorrência de I/O)
+ *   2. Recebe lotes de arquivos recém-baixados via callback (BatchConsumer)
+ *   3. Despacha o processamento de cada lote para threads em background, liberando o orquestrador
+ *   4. Em caso de instabilidade na rede (Circuit Breaker aberto), aborta graciosamente
+ *   5. Em ciclo independente, retenta o processamento de arquivos com falha
  * </pre>
- *
- * <p>Benefícios versus o fluxo anterior (download tudo → processa tudo):
- * <ul>
- *   <li>Memória controlada: apenas {@code batchSize} arquivos em memória por vez.</li>
- *   <li>Falha parcial: um lote com erro não afeta os demais.</li>
- *   <li>Progresso visível: registros aparecem no banco muito antes do ciclo terminar.</li>
- *   <li>Rastreamento persistente: sobrevive a restarts do container.</li>
- * </ul>
  */
 @Service
 @Slf4j
 @RequiredArgsConstructor
 public class SftpOrchestrator {
 
-    private final SftpConnectionManager connectionManager;
-    private final SftpDownloader        downloader;
-    private final FileProcessor         fileProcessor;
+    private final SftpDownloader downloader;
+    private final FileProcessor fileProcessor;
+
+    @Value("${sftp.schedule.rate.ms:300000}")
+    private long scheduleRateMs;
+
+    private static final DateTimeFormatter FORMATTER = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss");
+
+    // Semáforo atômico para evitar que dois ciclos de varredura rodem ao mesmo tempo
+    private final AtomicBoolean isVarreduraEmAndamento = new AtomicBoolean(false);
 
     @PostConstruct
     public void init() {
-        log.info(">>> SftpOrchestrator (Eixo) inicializado. Ciclos em lotes ativos.");
+        log.info(">>> SftpOrchestrator (Eixo) inicializado. Execução não-bloqueante a cada {} ms.", scheduleRateMs);
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // CICLO PRINCIPAL — download + processamento intercalados
-    // ─────────────────────────────────────────────────────────────
-
-    @Scheduled(fixedRateString = "${sftp.schedule.rate.ms}")
+    @Scheduled(fixedDelayString = "${sftp.schedule.rate.ms:300000}")
     public void executarCiclo() {
-        log.info("[SFTP] ════ Início do ciclo ════");
+        // Se a varredura anterior demorou mais de 5 minutos, pula o ciclo atual
+        if (!isVarreduraEmAndamento.compareAndSet(false, true)) {
+            log.warn("[SFTP] O ciclo anterior ainda está varrendo/baixando arquivos. Pulando ciclo atual.");
+            return;
+        }
+
+        log.info("[SFTP] ════ Início do ciclo principal (Gatilho) ════");
         long inicio = System.currentTimeMillis();
 
-        try (SftpConnectionManager.SftpConnection conn = connectionManager.open()) {
+        // Joga TODO o peso da rede e varredura para uma thread secundária.
+        // Assim o Orquestrador fica livre e imprime o log do próximo ciclo imediatamente.
+        CompletableFuture.runAsync(() -> {
+            try {
+                downloader.baixarArquivos((lote, tipoFonte) -> {
+                    log.info("[SFTP] Lote de {} arquivo(s) [{}] recebido para processamento.", lote.size(), tipoFonte);
 
-            // O consumer é chamado A CADA LOTE durante o download.
-            // Assim, enquanto o próximo lote está sendo baixado,
-            // o lote anterior já foi processado e gravado no banco.
-            SftpDownloader.DownloadSummary resumo = downloader.baixarEmLotes(
-                    conn.channel(),
-                    (lote, tipoFonte) -> {
-                        log.info("[SFTP] Lote de {} arquivo(s) [{}] enviado para background.", lote.size(), tipoFonte);
+                    CompletableFuture.runAsync(() -> {
+                        FileProcessor.ResultadoLote resultado = fileProcessor.processar(lote, tipoFonte);
+                        log.info("[SFTP] Lote processado: {} registros | {} ok | {} erro.",
+                                resultado.registrosTotais(),
+                                resultado.arquivosSucesso(),
+                                resultado.arquivosComErro());
+                    }).exceptionally(ex -> {
+                        log.error("[SFTP-Async] Falha não tratada no processamento em lote.", ex);
+                        return null;
+                    });
+                });
 
-                        // Processamento Assíncrono: Libera a thread principal para continuar baixando
-                        CompletableFuture.runAsync(() -> {
-                            FileProcessor.ResultadoLote resultado = fileProcessor.processar(lote, tipoFonte);
-                            log.info("[SFTP] Lote processado: {} registros | {} ok | {} erro.",
-                                    resultado.registrosTotais(),
-                                    resultado.arquivosSucesso(),
-                                    resultado.arquivosComErro());
-                        }).exceptionally(ex -> {
-                            log.error("[SFTP-Async] Falha não tratada no processamento em lote.", ex);
-                            return null;
-                        });
-                    }
-            );
-
-            if (resumo.isEmpty()) {
-                log.info("[SFTP] Nenhum arquivo novo encontrado.");
-            } else {
-                log.info("[SFTP] Ciclo principal: {} /recebidos | {} /radar.",
-                        resumo.recebidos(), resumo.radar());
+            } catch (SftpUnavailableException e) {
+                log.warn("[SFTP-CircuitBreaker] Ciclo interrompido. {}", e.getMessage());
+            } catch (Exception e) {
+                log.error("[SFTP] Erro crítico na thread de varredura: ", e);
+            } finally {
+                isVarreduraEmAndamento.set(false); // Libera o semáforo para o próximo ciclo
             }
+        });
 
-        } catch (Exception e) {
-            log.error("[SFTP] Erro crítico no ciclo: ", e);
-        } finally {
-            log.info("[SFTP] ════ Ciclo concluído em {}ms ════",
-                    System.currentTimeMillis() - inicio);
-        }
+        // Este log agora será impresso na hora, com a precisão dos 5 minutos exatos
+        LocalDateTime proximaExecucao = LocalDateTime.now().plus(scheduleRateMs, ChronoUnit.MILLIS);
+        log.info("[SFTP] ════ Gatilho disparado em {}ms. Próxima varredura programada para: {} ════",
+                System.currentTimeMillis() - inicio,
+                proximaExecucao.format(FORMATTER));
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // CICLO DE RETRY — executa separado, a cada 30 minutos
-    // ─────────────────────────────────────────────────────────────
-
-    /**
-     * Retenta arquivos que falharam em ciclos anteriores.
-     * Roda a cada 30 minutos e é independente do ciclo principal.
-     */
-    @Scheduled(fixedRateString = "${sftp.retry.rate.ms:1800000}")
+    @Scheduled(fixedDelayString = "${sftp.retry.rate.ms:1800000}")
     public void executarRetry() {
         List<ArquivoSftpProcessado> elegiveis = downloader.listarElegiveisParaRetry();
 
-        if (elegiveis.isEmpty()) {
-            log.debug("[SFTP-Retry] Nenhum arquivo elegível para retry.");
+        if (elegiveis == null || elegiveis.isEmpty()) {
             return;
         }
 
         log.info("[SFTP-Retry] Iniciando retry de {} arquivo(s) com erro.", elegiveis.size());
         long inicio = System.currentTimeMillis();
 
-        FileProcessor.ResultadoLote resultado = fileProcessor.retentarComErro(elegiveis);
+        try {
+            FileProcessor.ResultadoLote resultado = fileProcessor.retentarComErro(elegiveis);
 
-        log.info("[SFTP-Retry] Concluído em {}ms — {} registros | {} ok | {} erro.",
-                System.currentTimeMillis() - inicio,
-                resultado.registrosTotais(),
-                resultado.arquivosSucesso(),
-                resultado.arquivosComErro());
+            log.info("[SFTP-Retry] Concluído em {}ms — {} registros | {} ok | {} erro.",
+                    System.currentTimeMillis() - inicio,
+                    resultado.registrosTotais(),
+                    resultado.arquivosSucesso(),
+                    resultado.arquivosComErro());
+        } catch (Exception e) {
+            log.error("[SFTP-Retry] Falha inesperada durante a execução da rotina de retentativa.", e);
+        }
     }
 }
